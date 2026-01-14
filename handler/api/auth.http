@@ -1,0 +1,11 @@
+### AuthLoginByPassword
+POST {{url}}/login
+Accept: application/json
+Content-Type: application/json
+
+{
+  "username": "user",
+  "password": "password"
+}
+###> {% client.global.set("token", response.body.token) %}
+

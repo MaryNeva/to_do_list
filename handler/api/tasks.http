@@ -1,0 +1,55 @@
+### Tasks List
+GET {{url}}/tasks
+Accept: Application/json
+Content-Type: Application/json
+Authorization: Bearer {{token}}
+
+
+### Create Task
+POST {{url}}/tasks
+Accept: Application/json
+Content-Type: Application/json
+Authorization: Bearer {{token}}
+
+{
+  "title": "Note",
+  "description": "bla bla bla"
+
+}
+
+> {%
+    client.global.set("taskId", response.body.id);
+%}
+
+### Get Task
+GET {{url}}/task/1
+Accept: Application/json
+Content-Type: Application/json
+Authorization: Bearer {{token}}
+
+### Update Task
+PATCH {{url}}/tasks/1
+Accept: application/json
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "title": "cart"
+}
+
+### Delete Task
+DELETE {{url}}/tasks/1
+Accept: Application/json
+Content-Type: Application/json
+Authorization: Bearer {{token}}
+
+
+### Status Task
+POST {{url}}/tasks/1/toggle-status
+Accept: Application/json
+Content-Type: Application/json
+Authorization: Bearer {{token}}
+
+{
+  "status": "in_progress"
+}
