@@ -1,6 +1,10 @@
 package repo
 
-import "to-do-list.com/users/pkg/domain"
+import (
+	"time"
+
+	"to-do-list.com/users/pkg/domain"
+)
 
 type UserModel struct {
 	Id        int
@@ -8,6 +12,8 @@ type UserModel struct {
 	Email     string
 	Password  string
 	ListModel []int
+	CreateAt  time.Time
+	UpdateAt  time.Time
 }
 
 func toUserModel(user domain.User) UserModel {
@@ -17,6 +23,8 @@ func toUserModel(user domain.User) UserModel {
 		Email:     user.Email,
 		Password:  user.Password,
 		ListModel: user.ListTasks,
+		CreateAt:  user.CreateAt,
+		UpdateAt:  user.UpdateAt,
 	}
 }
 
@@ -27,5 +35,7 @@ func toUserDomain(user UserModel) domain.User {
 		Email:     user.Email,
 		Password:  user.Password,
 		ListTasks: user.ListModel,
+		CreateAt:  user.CreateAt,
+		UpdateAt:  user.UpdateAt,
 	}
 }

@@ -16,6 +16,24 @@ type usersStorePostgres struct {
 	db *pgxpool.Pool
 }
 
+func (u *usersStorePostgres) LoginUser(ctx context.Context, username string) (domain.User, error) {
+	query := fmt.Sprintf("SELECT * FROM %s WHERE name = $1;", tableUsers)
+
+	rows, err := u.db.Query(ctx, query, username)
+	if err != nil {
+		return domain.User{}, errors.New("failed to execute query")
+	}
+
+	defer rows.Close()
+
+	model, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByName[UserModel])
+	if err != nil {
+		return domain.User{}, errors.New("not found username or password in database")
+	}
+
+	return toUserDomain(model), nil
+}
+
 func (u *usersStorePostgres) GetUser(ctx context.Context, id int) (user domain.User, err error) {
 	query := fmt.Sprintf("SELECT * FROM %s WHERE id = $1;", tableUsers)
 
@@ -70,6 +88,6 @@ func (u *usersStorePostgres) DeleteUser(ctx context.Context, id int) error {
 	return err
 }
 
-func NewUserStore(ctx context.Context, dbPostgres *pgxpool.Pool) (store domain.UserStore, err error) {
-	return &usersStorePostgres{db: dbPostgres}, nil
+func NewUserStore(dbPostgres *pgxpool.Pool) domain.UserStore {
+	return &usersStorePostgres{db: dbPostgres}
 }

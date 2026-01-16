@@ -25,11 +25,11 @@ type Handler struct {
 }
 
 type App struct {
-	Address string `yaml:"adress"`
+	Address string `yaml:"address"`
 }
 
 type Authorization struct {
-	Name     string `yaml:"name"`
+	Username string `yaml:"username"`
 	Password string `yaml:"password"`
 }
 

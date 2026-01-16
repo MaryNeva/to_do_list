@@ -26,9 +26,8 @@ type Service interface {
 }
 
 type customClaims struct {
-	Id   string `json:"id"`
-	Name string `json:"name"`
-	Role string `json:"role"`
+	Id       string `json:"id"`
+	Username string `json:"username"`
 	jwt.RegisteredClaims
 }
 
@@ -42,10 +41,11 @@ func (t *tokenService) GenerateToken(user domain.User, headers ...map[string]any
 	if err != nil {
 		return "", errors.New("invalid token duration config")
 	}
+	id := strconv.Itoa(user.Id)
 
 	claims := &customClaims{
-		Id:   string(user.Id),
-		Name: user.Username,
+		Id:       id,
+		Username: user.Username,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   user.Username,
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(duration)),
@@ -76,9 +76,9 @@ func (t *tokenService) ValidateToken(tokenString string) (domain.User, error) {
 			return nil, errors.New("invalid token")
 		}
 
-		secret, err := createSecretKey(claims.Name, t.secret)
+		secret, err := createSecretKey(claims.Username, t.secret)
 		if err != nil {
-			return nil, err
+			return nil, errors.New("failed to create secret key")
 		}
 
 		return []byte(secret), nil
@@ -100,7 +100,7 @@ func (t *tokenService) ValidateToken(tokenString string) (domain.User, error) {
 
 	user := domain.User{
 		Id:       id,
-		Username: claims.Name,
+		Username: claims.Username,
 	}
 
 	return user, nil

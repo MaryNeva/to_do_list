@@ -1,11 +1,12 @@
 ### AuthLoginByPassword
-POST {{url}}/login
+POST {{url}}/auth/login
 Accept: application/json
 Content-Type: application/json
 
 {
-  "username": "user",
+  "username": "admin",
   "password": "password"
 }
-###> {% client.global.set("token", response.body.token) %}
+
+> {% client.global.set("token", response.body.token) %}
 

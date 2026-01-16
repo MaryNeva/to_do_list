@@ -64,9 +64,9 @@ func (t *tasksStorePostgres) ReadAllTasks(ctx context.Context) (tasks []domain.T
 func (t *tasksStorePostgres) CreateTask(ctx context.Context, task domain.Task) (domain.Task, error) {
 	model := toModelTask(task)
 
-	query := fmt.Sprintf("INSERT INTO %s (id, title, description) VALUES ($1) RETURNING id", tableTasks)
+	query := fmt.Sprintf("INSERT INTO %s (title, description) VALUES ($1) RETURNING id", tableTasks)
 
-	err := t.db.QueryRow(ctx, query, model.Id, model.Title, model.Description).Scan(&model.Id)
+	err := t.db.QueryRow(ctx, query, model.Title, model.Description).Scan(&model.Id)
 	if err != nil {
 		return domain.Task{}, err
 	}
@@ -91,6 +91,6 @@ func (t *tasksStorePostgres) DeleteTask(ctx context.Context, taskId int) error {
 	return err
 }
 
-func NewTaskStore(ctx context.Context, dbPostgres *pgxpool.Pool) (store domain.TaskStore, err error) {
-	return &tasksStorePostgres{db: dbPostgres}, nil
+func NewTaskStore(dbPostgres *pgxpool.Pool) domain.TaskStore {
+	return &tasksStorePostgres{db: dbPostgres}
 }

@@ -18,13 +18,12 @@ import (
 	"to-do-list.com/handler/internal/app/middleware"
 	"to-do-list.com/handler/internal/app/web"
 	"to-do-list.com/handler/internal/config"
-	"to-do-list.com/users/token"
-	"to-do-list.com/utils/dep"
-
 	tasks "to-do-list.com/tasks/pkg/app"
 	tasksdb "to-do-list.com/tasks/pkg/repo"
+	"to-do-list.com/users/password_service"
 	users "to-do-list.com/users/pkg/app"
 	usersdb "to-do-list.com/users/pkg/repo"
+	"to-do-list.com/users/token"
 )
 
 var (
@@ -33,30 +32,30 @@ var (
 )
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "--version", "-v":
-			fmt.Printf("Version: %s\nBuild Time: %s\n", Version, BuildTime)
-			return
-		}
-	}
+	//if len(os.Args) > 1 {
+	//	switch os.Args[1] {
+	//	case "--version", "-v":
+	//		fmt.Printf("Version: %s\nBuild Time: %s\n", Version, BuildTime)
+	//		return
+	//	}
+	//}
 
-	var webApp *fiber.App
+	var webApp = fiber.New()
 
-	webApp.Use(func(c *fiber.Ctx) error {
-		c.Set("X-Version", Version)
-		return c.Next()
-	})
+	//webApp.Use(func(c *fiber.Ctx) error {
+	//	c.Set("X-Version", Version)
+	//	return c.Next()
+	//})
 
 	ctx := context.Background()
 
 	var (
-		configsDir   string
-		migrationDir string
+		configsDir string
+		//migrationDir string
 	)
 
 	flag.StringVar(&configsDir, "configs", "../configs", "path to the admin-config directory")
-	flag.StringVar(&migrationDir, "migrate", "./migrations", "path to the migration directory")
+	//flag.StringVar(&migrationDir, "migrate", "./migrations", "path to the migration directory")
 	flag.Parse()
 
 	var cfg config.Config
@@ -68,7 +67,7 @@ func main() {
 
 	dsn := cfg.Handler.Repository.GetPath()
 
-	Migrate(migrationDir, dsn)
+	//Migrate(migrationDir, dsn)
 
 	postgresDB, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -82,15 +81,10 @@ func main() {
 
 	log.Info("Connected to the database successfully.")
 
-	taskStore, err := tasksdb.NewTaskStore(ctx, postgresDB)
-	if err != nil {
-		panic(err)
-	}
-
-	userStore, err := usersdb.NewUserStore(ctx, postgresDB)
-	if err != nil {
-		panic(err)
-	}
+	taskStore := tasksdb.NewTaskStore(postgresDB)
+	userStore := usersdb.NewUserStore(postgresDB)
+	tasksUC := tasks.NewTaskControl(taskStore, time.Second)
+	usersUC := users.NewUserControl(userStore, time.Second)
 
 	//healthStore, err := postgresdb.NewHealthStore(ctx, postgresDB)
 	//if err != nil {
@@ -99,10 +93,9 @@ func main() {
 
 	tokenService := token.NewTokenService(cfg.Handler.Security.JWT.ExpiresIn, cfg.Handler.Security.JWT.Secret)
 	middlewareJWT := middleware.NewTokenMiddleware(tokenService, cfg.Handler.Security.JWT.Secret)
-	//
-	//passwordService := password_service.NewPasswordService(cfg.Admin.Authorization.Name, cfg.Admin.Authorization.Password)
+	passwordService := password_service.NewPasswordService(cfg.Handler.Authorization.Username, cfg.Handler.Authorization.Password)
 
-	//loginFn := authorization.NewLogin(authStore, passwordService, time.Second)
+	authUC := users.NewAuthControl(passwordService, userStore, tokenService, time.Second)
 
 	//app.NewInstance(
 	//	authStore,
@@ -121,22 +114,14 @@ func main() {
 	//	app.NewHealthcheck(),
 	//))
 
-	api := JsonRestApi(webApp.Group("/api"))
+	api := JsonRestApi(webApp.Group("/"))
 
-	//web.TaskEndpoint(api.Group("/auth"), dep.ProvideMany(
-	//	authorization.NewAuthenticate(loginFn, tokenService, time.Second),
-	//	authorization.NewValidateToken(authStore, tokenService, time.Second),
-	//))
+	web.AuthEndpoint(api.Group("/auth"), authUC)
 
 	protected := api.Group("", middlewareJWT.JWTMiddleware())
 
-	web.UserEndpoint(protected.Group("/users"), dep.ProvideMany(
-		users.NewUserControl(userStore, time.Second),
-	))
-
-	web.TaskEndpoint(protected.Group("/tasks"), dep.ProvideMany(
-		tasks.NewTaskControl(taskStore, time.Second),
-	))
+	web.TaskEndpoint(protected.Group("/tasks"), tasksUC)
+	web.UserEndpoint(protected.Group("/users"), usersUC)
 
 	if err := ListenAndServe(webApp, cfg.Handler.App.Address); err != nil {
 		panic(err)

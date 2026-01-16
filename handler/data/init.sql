@@ -1,3 +1,7 @@
+CREATE USER "user1" WITH PASSWORD 'password';
+CREATE DATABASE to_do OWNER "user1";
+
+
 DO $$
     BEGIN
         IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'status') THEN
@@ -12,6 +16,7 @@ CREATE TABLE IF NOT EXISTS public.tasks (
                                             id bigserial PRIMARY KEY,
                                             title TEXT NOT NULL,
                                             description TEXT NOT NULL,
+                                            completed bool default false,
                                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                                             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                                             status status NOT NULL DEFAULT 'created'
@@ -23,6 +28,7 @@ CREATE TABLE IF NOT EXISTS public.users (
                                             secret TEXT NOT NULL UNIQUE,
                                             username TEXT NOT NULL,
                                             password TEXT NOT NULL,
+                                            email TEXT NOT NULL,
                                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                                             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 
@@ -56,9 +62,9 @@ EXECUTE FUNCTION update_timestamp();
 
 
 -- Create a trigger on the user_tasks table
-CREATE TRIGGER trg_unset_default_currency
+CREATE TRIGGER trg_unset_default_tasks
     AFTER DELETE ON user_tasks
     FOR EACH ROW
-EXECUTE FUNCTION unset_default_currency_if_deleted();
+EXECUTE FUNCTION unset_default_tasks_if_deleted();
 
 

@@ -18,14 +18,14 @@ type Task struct {
 	UpdateAt    time.Time `json:"update_at"`
 }
 
-type (
-	GetTask      func(ctx context.Context, id int) (Task, error)
-	GetListTasks func(ctx context.Context) ([]Task, error)
-	CreateTask   func(ctx context.Context, task Task) (Task, error)
-	UpdateTask   func(ctx context.Context, task Task) (Task, error)
-	DeleteTask   func(ctx context.Context, id int) error
-	ToggleStatus func(ctx context.Context, id int) error
-)
+type TaskUC interface {
+	GetTask(ctx context.Context, id int) (Task, error)
+	GetListTasks(ctx context.Context) ([]Task, error)
+	CreateTask(ctx context.Context, task Task) (Task, error)
+	UpdateTask(ctx context.Context, task Task) (Task, error)
+	DeleteTask(ctx context.Context, id int) error
+	//ToggleStatus func(ctx context.Context, id int) error
+}
 
 type TaskStore interface {
 	ReadTaskById(ctx context.Context, id int) (Task, error)
@@ -33,5 +33,5 @@ type TaskStore interface {
 	UpdateTask(ctx context.Context, task Task) error
 	DeleteTask(ctx context.Context, id int) error
 	CreateTask(ctx context.Context, task Task) (Task, error)
-	ToggleStatus(ctx context.Context, id int) error
+	//ToggleStatus(ctx context.Context, id int) error
 }

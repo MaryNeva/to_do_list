@@ -1,0 +1,12 @@
+services:
+  # ----------------------------
+  # Postgres
+  # ----------------------------
+  postgres:
+    container_name: to_do
+    restart: always
+    image: postgres:17
+    env_file: .env
+    command: ["postgres", "-c", "listen_addresses=*"]
+    ports:
+      - "5432:5432"

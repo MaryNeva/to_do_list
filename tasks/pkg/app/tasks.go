@@ -12,7 +12,7 @@ type taskStore struct {
 	duration time.Duration
 }
 
-func (t *taskStore) GetTasks(ctx context.Context) ([]tasks.Task, error) {
+func (t *taskStore) GetListTasks(ctx context.Context) ([]tasks.Task, error) {
 	list, err := t.store.ReadAllTasks(ctx)
 	if err != nil {
 		return nil, err
@@ -50,8 +50,8 @@ func (t *taskStore) DeleteTask(ctx context.Context, id int) error {
 	return t.store.DeleteTask(ctx, id)
 }
 
-func NewTaskControl(store tasks.TaskStore, duration time.Duration) taskStore {
-	return taskStore{
+func NewTaskControl(store tasks.TaskStore, duration time.Duration) tasks.TaskUC {
+	return &taskStore{
 		store:    store,
 		duration: duration,
 	}

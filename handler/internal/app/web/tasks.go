@@ -4,15 +4,10 @@ import (
 	"github.com/gofiber/fiber/v2"
 	tasks "to-do-list.com/tasks/pkg/domain"
 	"to-do-list.com/tasks/pkg/interfaces/payload"
-	"to-do-list.com/utils/dep"
 )
 
 type taskController struct {
-	createTask tasks.CreateTask
-	getTask    tasks.GetTask
-	updateTask tasks.UpdateTask
-	deleteTask tasks.DeleteTask
-	getList    tasks.GetListTasks
+	taskUC tasks.TaskUC
 }
 
 func (t *taskController) create(ctx *fiber.Ctx) error {
@@ -24,7 +19,7 @@ func (t *taskController) create(ctx *fiber.Ctx) error {
 
 	request := payload.ToTaskDomain(req)
 
-	task, err := t.createTask(ctx.Context(), request)
+	task, err := t.taskUC.CreateTask(ctx.Context(), request)
 	if err != nil {
 		return err
 	}
@@ -39,12 +34,20 @@ func (t *taskController) get(ctx *fiber.Ctx) error {
 		return err
 	}
 
-	task, err := t.getTask(ctx.Context(), req.Id)
+	task, err := t.taskUC.GetTask(ctx.Context(), req.Id)
 	if err != nil {
 		return err
 	}
 
 	return ctx.JSON(task)
+}
+
+func (t *taskController) list(ctx *fiber.Ctx) error {
+	users, err := t.taskUC.GetListTasks(ctx.Context())
+	if err != nil {
+		return err
+	}
+	return ctx.JSON(users)
 }
 
 func (t *taskController) update(ctx *fiber.Ctx) error {
@@ -54,7 +57,7 @@ func (t *taskController) update(ctx *fiber.Ctx) error {
 	}
 	request := payload.ToTaskDomain(req)
 
-	task, err := t.updateTask(ctx.Context(), request)
+	task, err := t.taskUC.UpdateTask(ctx.Context(), request)
 	if err != nil {
 		return err
 	}
@@ -67,7 +70,7 @@ func (t *taskController) delete(ctx *fiber.Ctx) error {
 	if err := ctx.JSON(&req); err != nil {
 		return err
 	}
-	err := t.deleteTask(ctx.Context(), req.Id)
+	err := t.taskUC.DeleteTask(ctx.Context(), req.Id)
 	if err != nil {
 		return err
 	}
@@ -75,13 +78,9 @@ func (t *taskController) delete(ctx *fiber.Ctx) error {
 	return ctx.JSON("deleted")
 }
 
-func TaskEndpoint(router fiber.Router, deps []any) {
+func TaskEndpoint(router fiber.Router, tasksUC tasks.TaskUC) {
 	ctrl := taskController{
-		createTask: dep.MustInject[tasks.CreateTask](deps),
-		getTask:    dep.MustInject[tasks.GetTask](deps),
-		updateTask: dep.MustInject[tasks.UpdateTask](deps),
-		deleteTask: dep.MustInject[tasks.DeleteTask](deps),
-		getList:    dep.MustInject[tasks.GetListTasks](deps),
+		taskUC: tasksUC,
 	}
 
 	task := router.Group("/")
@@ -89,4 +88,5 @@ func TaskEndpoint(router fiber.Router, deps []any) {
 	task.Get("/:id", ctrl.get)
 	task.Delete("/:id", ctrl.delete)
 	task.Patch("/:id", ctrl.update)
+	task.Get("/", ctrl.list)
 }
