@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"strconv"
 
 	"github.com/gofiber/fiber/v2"
 	users "to-do-list.com/users/pkg/domain"
@@ -54,6 +55,22 @@ func (a *authController) validateToken(ctx *fiber.Ctx) error {
 	})
 }
 
+func (a *authController) create(ctx *fiber.Ctx) error {
+	var req payload.User
+	if err := ctx.BodyParser(&req); err != nil {
+		return err
+	}
+
+	request := payload.ToUserDomain(req)
+
+	user, err := a.authUC.CreateUser(ctx.Context(), request)
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(payload.ToUserPayload(user))
+}
+
 func AuthEndpoint(router fiber.Router, authUC users.AuthService) {
 	ctrl := authController{
 		authUC: authUC,
@@ -62,65 +79,67 @@ func AuthEndpoint(router fiber.Router, authUC users.AuthService) {
 	auth := router.Group("/")
 	auth.Post("/login", ctrl.login)
 	auth.Get("/validate", ctrl.validateToken)
+	auth.Post("/new", ctrl.create)
 }
 
 type userController struct {
 	userUC users.UserUC
 }
 
-func (u *userController) create(ctx *fiber.Ctx) error {
-	var req payload.User
-	if err := ctx.JSON(&req); err != nil {
-		return err
-	}
-
-	request := payload.ToUserDomain(req)
-
-	task, err := u.userUC.CreateUser(ctx.Context(), request)
+func (u *userController) get(ctx *fiber.Ctx) error {
+	id, err := strconv.Atoi(ctx.Params("id"))
 	if err != nil {
 		return err
 	}
 
-	return ctx.JSON(task)
+	user, err := u.userUC.GetUser(ctx.Context(), id)
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(payload.ToUserPayload(user))
 }
 
-func (u *userController) get(ctx *fiber.Ctx) error {
-	var req payload.User
-	if err := ctx.JSON(&req); err != nil {
-		return err
-	}
+func (u *userController) list(ctx *fiber.Ctx) error {
 
-	task, err := u.userUC.GetUser(ctx.Context(), req.Id)
+	usersList, err := u.userUC.GetList(ctx.Context())
 	if err != nil {
 		return err
 	}
 
-	return ctx.JSON(task)
+	result := payload.ToListPayload(usersList)
+
+	return ctx.JSON(result)
 }
 
 func (u *userController) update(ctx *fiber.Ctx) error {
+	id, err := strconv.Atoi(ctx.Params("id"))
+	if err != nil {
+		return err
+	}
+
 	var req payload.User
-	if err := ctx.JSON(&req); err != nil {
+	if err := ctx.BodyParser(&req); err != nil {
 		return err
 	}
 
 	request := payload.ToUserDomain(req)
 
-	task, err := u.userUC.UpdateUser(ctx.Context(), request)
+	updatedUser, err := u.userUC.UpdateUser(ctx.Context(), id, request)
 	if err != nil {
 		return err
 	}
 
-	return ctx.JSON(task)
+	return ctx.JSON(payload.ToUserPayload(updatedUser))
 }
 
 func (u *userController) delete(ctx *fiber.Ctx) error {
-	var req payload.User
-	if err := ctx.JSON(&req); err != nil {
+	id, err := strconv.Atoi(ctx.Params("id"))
+	if err != nil {
 		return err
 	}
 
-	err := u.userUC.DeleteUser(ctx.Context(), req.Id)
+	err = u.userUC.DeleteUser(ctx.Context(), id)
 	if err != nil {
 		return err
 	}
@@ -134,7 +153,8 @@ func UserEndpoint(router fiber.Router, usersUC users.UserUC) {
 	}
 
 	user := router.Group("/")
-	user.Post("/new", ctrl.create)
+	//	user.Post("/new", ctrl.create)
+	user.Get("/", ctrl.list)
 	user.Get("/:id", ctrl.get)
 	user.Delete("/:id", ctrl.delete)
 	user.Patch("/:id", ctrl.update)

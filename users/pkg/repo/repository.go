@@ -17,7 +17,7 @@ type usersStorePostgres struct {
 }
 
 func (u *usersStorePostgres) LoginUser(ctx context.Context, username string) (domain.User, error) {
-	query := fmt.Sprintf("SELECT * FROM %s WHERE name = $1;", tableUsers)
+	query := fmt.Sprintf("SELECT * FROM %s WHERE username = $1;", tableUsers)
 
 	rows, err := u.db.Query(ctx, query, username)
 	if err != nil {
@@ -56,12 +56,42 @@ func (u *usersStorePostgres) GetUser(ctx context.Context, id int) (user domain.U
 	return toUserDomain(model), err
 }
 
+func (u *usersStorePostgres) GetList(ctx context.Context) (users []domain.User, err error) {
+	query := fmt.Sprintf("SELECT * FROM %s;", tableUsers)
+
+	rows, err := u.db.Query(ctx, query)
+	if err != nil {
+		return []domain.User{}, errors.New("failed to parse users rows")
+	}
+
+	defer rows.Close()
+
+	models, err := pgx.CollectRows(rows, pgx.RowToStructByName[UserModel])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return []domain.User{}, err
+	}
+
+	if err != nil {
+		return []domain.User{}, err
+	}
+
+	if len(models) == 0 {
+		return users, errors.New("no merchants found")
+	}
+
+	users = make([]domain.User, len(models))
+	for i, model := range models {
+		users[i] = toUserDomain(model)
+	}
+
+	return users, nil
+}
+
 func (u *usersStorePostgres) CreateUser(ctx context.Context, user domain.User) (domain.User, error) {
 	model := toUserModel(user)
 
-	query := fmt.Sprintf("INSERT INTO %s (username, email, password) VALUES ($1) RETURNING id", tableUsers)
-
-	err := u.db.QueryRow(ctx, query, model.Username, model.Password).Scan(&model.Id)
+	query := fmt.Sprintf("INSERT INTO %s (username, email, password) VALUES ($1, $2, $3) RETURNING id, created_at", tableUsers)
+	err := u.db.QueryRow(ctx, query, model.Username, model.Email, model.Password).Scan(&model.Id, &model.CreatedAt)
 	if err != nil {
 		return domain.User{}, err
 	}
@@ -69,9 +99,9 @@ func (u *usersStorePostgres) CreateUser(ctx context.Context, user domain.User) (
 	return toUserDomain(model), nil
 }
 
-func (u *usersStorePostgres) UpdateUser(ctx context.Context, user domain.User) error {
-	query := fmt.Sprintf("UPDATE %s SET username = $1, email = $2, password = $3", tableUsers)
-	_, err := u.db.Exec(ctx, query, user.Username, user.Email, user.Password)
+func (u *usersStorePostgres) UpdateUser(ctx context.Context, id int, user domain.User) error {
+	query := fmt.Sprintf("UPDATE %s SET username = $1, email = $2, password = $3 WHERE id=$4", tableUsers)
+	_, err := u.db.Exec(ctx, query, user.Username, user.Email, user.Password, id)
 	if err != nil {
 		return err
 	}

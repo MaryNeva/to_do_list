@@ -22,23 +22,24 @@ Authorization: Bearer {{token}}
 %}
 
 ### Get Task
-GET {{url}}/task/1
+GET {{url}}/tasks/4
 Accept: Application/json
 Content-Type: Application/json
 Authorization: Bearer {{token}}
 
 ### Update Task
-PATCH {{url}}/tasks/1
+PATCH {{url}}/tasks/4
 Accept: application/json
 Content-Type: application/json
 Authorization: Bearer {{token}}
 
 {
-  "title": "cart"
+  "title": "cart",
+  "description": "1 + 1"
 }
 
 ### Delete Task
-DELETE {{url}}/tasks/1
+DELETE {{url}}/tasks/3
 Accept: Application/json
 Content-Type: Application/json
 Authorization: Bearer {{token}}
@@ -50,6 +51,4 @@ Accept: Application/json
 Content-Type: Application/json
 Authorization: Bearer {{token}}
 
-{
-  "status": "in_progress"
-}
+

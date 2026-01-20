@@ -10,9 +10,23 @@ type Task struct {
 	Id          int       `json:"id"`
 	Title       string    `json:"title"`
 	Description string    `json:"description"`
-	Completed   bool      `json:"completed"`
-	CreateAt    time.Time `json:"create_at"`
-	UpdateAt    time.Time `json:"update_at"`
+	Status      string    `json:"status"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type List struct {
+	List []Task `json:"list"`
+}
+
+func ToListPayload(list []domain.Task) List {
+	var result List
+	for _, user := range list {
+		userP := ToTaskPayload(user)
+		result.List = append(result.List, userP)
+	}
+
+	return result
 }
 
 func ToTaskDomain(task Task) domain.Task {
@@ -20,9 +34,9 @@ func ToTaskDomain(task Task) domain.Task {
 		Id:          task.Id,
 		Title:       task.Title,
 		Description: task.Description,
-		Completed:   task.Completed,
-		CreateAt:    task.CreateAt,
-		UpdateAt:    task.UpdateAt,
+		Status:      task.Status,
+		CreatedAt:   task.CreatedAt,
+		UpdatedAt:   task.UpdatedAt,
 	}
 }
 
@@ -31,8 +45,8 @@ func ToTaskPayload(task domain.Task) Task {
 		Id:          task.Id,
 		Title:       task.Title,
 		Description: task.Description,
-		Completed:   task.Completed,
-		CreateAt:    task.CreateAt,
-		UpdateAt:    task.UpdateAt,
+		Status:      task.Status,
+		CreatedAt:   task.CreatedAt,
+		UpdatedAt:   task.UpdatedAt,
 	}
 }

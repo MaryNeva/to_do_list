@@ -7,13 +7,12 @@ import (
 )
 
 type UserModel struct {
-	Id        int
-	Username  string
-	Email     string
-	Password  string
-	ListModel []int
-	CreateAt  time.Time
-	UpdateAt  time.Time
+	Id        int       `json:"id"`
+	Username  string    `json:"username,omitempty"`
+	Email     string    `json:"email,omitempty"`
+	Password  string    `json:"password,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func toUserModel(user domain.User) UserModel {
@@ -22,9 +21,8 @@ func toUserModel(user domain.User) UserModel {
 		Username:  user.Username,
 		Email:     user.Email,
 		Password:  user.Password,
-		ListModel: user.ListTasks,
-		CreateAt:  user.CreateAt,
-		UpdateAt:  user.UpdateAt,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
 	}
 }
 
@@ -34,8 +32,7 @@ func toUserDomain(user UserModel) domain.User {
 		Username:  user.Username,
 		Email:     user.Email,
 		Password:  user.Password,
-		ListTasks: user.ListModel,
-		CreateAt:  user.CreateAt,
-		UpdateAt:  user.UpdateAt,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
 	}
 }

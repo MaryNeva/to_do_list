@@ -1,4 +1,4 @@
-#include .env
+include .env
 
 MIGRATION_INIT_FILE=data/init.sql
 MIGRATION_FILE=

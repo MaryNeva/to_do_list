@@ -15,11 +15,24 @@ type AuthRequest struct {
 type User struct {
 	Id        int       `json:"id"`
 	Username  string    `json:"username" validate:"omitempty,min=3,max=50"`
-	Email     string    `json:"email"  `
+	Email     string    `json:"email" validate:"omitempty,email"`
 	Password  string    `json:"password" validate:"omitempty,min=8,max=32"`
-	ListTasks []int     `json:"list_tasks"`
-	CreateAt  time.Time `json:"create_at"`
-	UpdateAt  time.Time `json:"update_at"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type List struct {
+	List []User `json:"list"`
+}
+
+func ToListPayload(list []domain.User) List {
+	var result List
+	for _, user := range list {
+		userP := ToUserPayload(user)
+		result.List = append(result.List, userP)
+	}
+
+	return result
 }
 
 func ToUserDomain(user User) domain.User {
@@ -28,9 +41,8 @@ func ToUserDomain(user User) domain.User {
 		Username:  user.Username,
 		Email:     user.Email,
 		Password:  user.Password,
-		ListTasks: user.ListTasks,
-		CreateAt:  user.CreateAt,
-		UpdateAt:  user.UpdateAt,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
 	}
 }
 
@@ -40,9 +52,8 @@ func ToUserPayload(user domain.User) User {
 		Username:  user.Username,
 		Email:     user.Email,
 		Password:  user.Password,
-		ListTasks: user.ListTasks,
-		CreateAt:  user.CreateAt,
-		UpdateAt:  user.UpdateAt,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
 	}
 }
 
