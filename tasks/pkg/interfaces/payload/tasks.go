@@ -13,6 +13,7 @@ type Task struct {
 	Status      string    `json:"status"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	Creator     int       `json:"creator"`
 }
 
 type List struct {
@@ -21,9 +22,9 @@ type List struct {
 
 func ToListPayload(list []domain.Task) List {
 	var result List
-	for _, user := range list {
-		userP := ToTaskPayload(user)
-		result.List = append(result.List, userP)
+	for _, task := range list {
+		taskP := ToTaskPayload(task)
+		result.List = append(result.List, taskP)
 	}
 
 	return result
@@ -37,6 +38,7 @@ func ToTaskDomain(task Task) domain.Task {
 		Status:      task.Status,
 		CreatedAt:   task.CreatedAt,
 		UpdatedAt:   task.UpdatedAt,
+		Creator:     task.Creator,
 	}
 }
 
@@ -48,5 +50,6 @@ func ToTaskPayload(task domain.Task) Task {
 		Status:      task.Status,
 		CreatedAt:   task.CreatedAt,
 		UpdatedAt:   task.UpdatedAt,
+		Creator:     task.Creator,
 	}
 }

@@ -86,33 +86,11 @@ func main() {
 	tasksUC := tasks.NewTaskControl(taskStore, time.Second)
 	usersUC := users.NewUserControl(userStore, time.Second)
 
-	//healthStore, err := postgresdb.NewHealthStore(ctx, postgresDB)
-	//if err != nil {
-	//	panic(err)
-	//}
-
 	tokenService := token.NewTokenService(cfg.Handler.Security.JWT.ExpiresIn, cfg.Handler.Security.JWT.Secret)
 	middlewareJWT := middleware.NewTokenMiddleware(tokenService, cfg.Handler.Security.JWT.Secret)
 	passwordService := password_service.NewPasswordService(cfg.Handler.Authorization.Username, cfg.Handler.Authorization.Password)
 
 	authUC := users.NewAuthControl(passwordService, userStore, tokenService, time.Second)
-
-	//app.NewInstance(
-	//	authStore,
-	//	userStore,
-	//	taskStore,
-	//	healthStore)
-
-	//http.HealthcheckEndpoint(webApp.Group("/healthcheck/admin", func(ctx *fiber.Ctx) error {
-	//	token := ctx.Get("Sanitation")
-	//	if token != cfg.Handler.HealthSecret {
-	//		return fiber.NewError(fiber.StatusNotFound)
-	//	}
-	//
-	//	return ctx.Next()
-	//}), dep.ProvideMany(
-	//	app.NewHealthcheck(),
-	//))
 
 	api := JsonRestApi(webApp.Group("/"))
 

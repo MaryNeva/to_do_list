@@ -18,13 +18,23 @@ Accept: application/json
 Content-Type: application/json
 
 {
+  "username": "alena",
+  "password": "11112223"
+}
+
+> {% client.global.set("token", response.body.token) %}
+
+### AuthLoginByPassword
+POST {{url}}/auth/login
+Accept: application/json
+Content-Type: application/json
+
+{
   "username": "alex",
   "password": "11112222"
 }
 
 > {% client.global.set("token", response.body.token) %}
-
-
 
 ### GetAllUsers
 GET {{url}}/users
@@ -47,9 +57,9 @@ Content-Type: Application/json
 
 
 {
-  "username": "alena",
-  "password": "11112223",
-  "email": "test3@gmail.com"
+  "username": "alex",
+  "password": "11112222",
+  "email": "test2@gmail.com"
 }
 
 

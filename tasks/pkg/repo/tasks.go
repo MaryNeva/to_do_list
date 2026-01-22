@@ -13,6 +13,7 @@ type TaskModel struct {
 	Status      string    `json:"status"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	Creator     int       `json:"creator"`
 }
 
 func toModelTask(entity domain.Task) TaskModel {
@@ -23,6 +24,7 @@ func toModelTask(entity domain.Task) TaskModel {
 		Status:      entity.Status,
 		CreatedAt:   entity.CreatedAt,
 		UpdatedAt:   entity.UpdatedAt,
+		Creator:     entity.Creator,
 	}
 }
 
@@ -34,5 +36,6 @@ func toTaskDomain(model TaskModel) domain.Task {
 		Status:      model.Status,
 		CreatedAt:   model.CreatedAt,
 		UpdatedAt:   model.UpdatedAt,
+		Creator:     model.Creator,
 	}
 }

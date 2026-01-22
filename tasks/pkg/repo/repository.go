@@ -10,16 +10,18 @@ import (
 	"to-do-list.com/tasks/pkg/domain"
 )
 
-var tableTasks = "tasks"
+var (
+	tableTasks = "tasks"
+)
 
 type tasksStorePostgres struct {
 	db *pgxpool.Pool
 }
 
-func (t *tasksStorePostgres) ReadTaskById(ctx context.Context, taskId int) (task domain.Task, err error) {
-	query := fmt.Sprintf("SELECT * FROM %s WHERE id = $1;", tableTasks)
+func (t *tasksStorePostgres) ReadTaskById(ctx context.Context, taskId, creator int) (task domain.Task, err error) {
+	query := fmt.Sprintf("SELECT * FROM %s WHERE id = $1 AND creator = $2;", tableTasks)
 
-	rows, err := t.db.Query(ctx, query, taskId)
+	rows, err := t.db.Query(ctx, query, taskId, creator)
 	if err != nil {
 		return task, err
 	}
@@ -38,8 +40,10 @@ func (t *tasksStorePostgres) ReadTaskById(ctx context.Context, taskId int) (task
 	return toTaskDomain(model), err
 }
 
-func (t *tasksStorePostgres) ReadAllTasks(ctx context.Context) (tasks []domain.Task, err error) {
-	rows, err := t.db.Query(ctx, tableTasks)
+func (t *tasksStorePostgres) ReadAllTasks(ctx context.Context, creator int) (tasks []domain.Task, err error) {
+	query := fmt.Sprintf("SELECT * FROM %s WHERE creator = $1;", tableTasks)
+	rows, err := t.db.Query(ctx, query, creator)
+
 	if err != nil {
 		return nil, err
 	}
@@ -63,9 +67,10 @@ func (t *tasksStorePostgres) ReadAllTasks(ctx context.Context) (tasks []domain.T
 
 func (t *tasksStorePostgres) CreateTask(ctx context.Context, task domain.Task) (domain.Task, error) {
 	model := toModelTask(task)
-	query := fmt.Sprintf("INSERT INTO %s (title, description) VALUES ($1, $2) RETURNING id, status", tableTasks)
 
-	err := t.db.QueryRow(ctx, query, model.Title, model.Description).Scan(&model.Id, &model.Status)
+	query := fmt.Sprintf("INSERT INTO %s (title, description, creator) VALUES ($1, $2, $3) RETURNING id, status, creator", tableTasks)
+
+	err := t.db.QueryRow(ctx, query, model.Title, model.Description, model.Creator).Scan(&model.Id, &model.Status, &model.Creator)
 	if err != nil {
 		return domain.Task{}, err
 	}
@@ -73,11 +78,11 @@ func (t *tasksStorePostgres) CreateTask(ctx context.Context, task domain.Task) (
 	return toTaskDomain(model), nil
 }
 
-func (t *tasksStorePostgres) UpdateTask(ctx context.Context, id int, task domain.Task) error {
+func (t *tasksStorePostgres) UpdateTask(ctx context.Context, id, creator int, task domain.Task) error {
 	model := toModelTask(task)
-	query := fmt.Sprintf("UPDATE %s SET title = $1, description = $2 WHERE id = $3", tableTasks)
+	query := fmt.Sprintf("UPDATE %s SET title = $1, description = $2 WHERE id = $3 AND creator = $4;", tableTasks)
 
-	_, err := t.db.Exec(ctx, query, model.Title, model.Description, id)
+	_, err := t.db.Exec(ctx, query, model.Title, model.Description, id, creator)
 	if err != nil {
 		return err
 	}
@@ -85,20 +90,25 @@ func (t *tasksStorePostgres) UpdateTask(ctx context.Context, id int, task domain
 	return nil
 }
 
-func (t *tasksStorePostgres) DeleteTask(ctx context.Context, taskId int) error {
-	query := fmt.Sprintf("DELETE FROM %s WHERE id = $1;", tableTasks)
+func (t *tasksStorePostgres) DeleteTask(ctx context.Context, taskId, creator int) error {
+	query := fmt.Sprintf("DELETE FROM %s WHERE id = $1 AND creator = $2;", tableTasks)
 
-	_, err := t.db.Exec(ctx, query, taskId)
+	cmd, err := t.db.Exec(ctx, query, taskId, creator)
 	if err != nil {
 		return err
 	}
-	return err
+
+	if cmd.RowsAffected() == 0 {
+		return errors.New("task not found or not owned by user")
+	}
+
+	return nil
 }
 
-func (t *tasksStorePostgres) ToggleStatus(ctx context.Context, id int, status string) error {
-	query := fmt.Sprintf("UPDATE %s SET status = $2 WHERE id = $1;", tableTasks)
+func (t *tasksStorePostgres) ToggleStatus(ctx context.Context, id, creator int, status string) error {
+	query := fmt.Sprintf("UPDATE %s SET status = $2 WHERE id = $1 AND creator = $3;", tableTasks)
 
-	cmdTag, err := t.db.Exec(ctx, query, id, status)
+	cmdTag, err := t.db.Exec(ctx, query, id, status, creator)
 	if err != nil {
 		return err
 	}

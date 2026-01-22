@@ -6,6 +6,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	tasks "to-do-list.com/tasks/pkg/domain"
 	"to-do-list.com/tasks/pkg/interfaces/payload"
+	users "to-do-list.com/users/pkg/domain"
 )
 
 type taskController struct {
@@ -18,6 +19,12 @@ func (t *taskController) create(ctx *fiber.Ctx) error {
 		return err
 	}
 
+	user, err := getUser(ctx)
+	if err != nil {
+		return err
+	}
+
+	req.Creator = user.Id
 	request := payload.ToTaskDomain(req)
 
 	task, err := t.taskUC.CreateTask(ctx.Context(), request)
@@ -25,22 +32,35 @@ func (t *taskController) create(ctx *fiber.Ctx) error {
 		return err
 	}
 
-	return ctx.JSON(task)
+	return ctx.JSON(payload.ToTaskPayload(task))
 }
 
 func (t *taskController) get(ctx *fiber.Ctx) error {
 	id, err := strconv.Atoi(ctx.Params("id"))
+	if err != nil {
+		return ctx.SendStatus(fiber.StatusBadRequest)
+	}
 
-	task, err := t.taskUC.GetTask(ctx.Context(), id)
+	user, err := getUser(ctx)
 	if err != nil {
 		return err
 	}
 
-	return ctx.JSON(task)
+	task, err := t.taskUC.GetTask(ctx.Context(), id, user.Id)
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(payload.ToTaskPayload(task))
 }
 
 func (t *taskController) list(ctx *fiber.Ctx) error {
-	tasksList, err := t.taskUC.GetListTasks(ctx.Context())
+	user, err := getUser(ctx)
+	if err != nil {
+		return err
+	}
+
+	tasksList, err := t.taskUC.GetListTasks(ctx.Context(), user.Id)
 	if err != nil {
 		return err
 	}
@@ -49,7 +69,15 @@ func (t *taskController) list(ctx *fiber.Ctx) error {
 }
 
 func (t *taskController) update(ctx *fiber.Ctx) error {
+	user, err := getUser(ctx)
+	if err != nil {
+		return err
+	}
+
 	id, err := strconv.Atoi(ctx.Params("id"))
+	if err != nil {
+		return ctx.SendStatus(fiber.StatusBadRequest)
+	}
 
 	var req payload.Task
 	if err := ctx.BodyParser(&req); err != nil {
@@ -58,7 +86,7 @@ func (t *taskController) update(ctx *fiber.Ctx) error {
 
 	request := payload.ToTaskDomain(req)
 
-	task, err := t.taskUC.UpdateTask(ctx.Context(), id, request)
+	task, err := t.taskUC.UpdateTask(ctx.Context(), id, user.Id, request)
 	if err != nil {
 		return err
 	}
@@ -68,19 +96,35 @@ func (t *taskController) update(ctx *fiber.Ctx) error {
 
 func (t *taskController) delete(ctx *fiber.Ctx) error {
 	id, err := strconv.Atoi(ctx.Params("id"))
+	if err != nil {
+		return ctx.SendStatus(fiber.StatusBadRequest)
+	}
 
-	err = t.taskUC.DeleteTask(ctx.Context(), id)
+	user, err := getUser(ctx)
 	if err != nil {
 		return err
 	}
 
-	return ctx.JSON("deleted")
+	err = t.taskUC.DeleteTask(ctx.Context(), id, user.Id)
+	if err != nil {
+		return err
+	}
+
+	return ctx.SendStatus(fiber.StatusNoContent)
 }
 
 func (t *taskController) toggle(ctx *fiber.Ctx) error {
 	id, err := strconv.Atoi(ctx.Params("id"))
+	if err != nil {
+		return ctx.SendStatus(fiber.StatusBadRequest)
+	}
 
-	task, err := t.taskUC.ToggleStatus(ctx.Context(), id)
+	user, err := getUser(ctx)
+	if err != nil {
+		return err
+	}
+
+	task, err := t.taskUC.ToggleStatus(ctx.Context(), id, user.Id)
 	if err != nil {
 		return err
 	}
@@ -100,4 +144,12 @@ func TaskEndpoint(router fiber.Router, tasksUC tasks.TaskUC) {
 	task.Patch("/:id", ctrl.update)
 	task.Get("/", ctrl.list)
 	task.Post("/:id/toggle-status", ctrl.toggle)
+}
+
+func getUser(ctx *fiber.Ctx) (users.User, error) {
+	user, ok := ctx.Locals("user").(users.User)
+	if !ok {
+		return users.User{}, fiber.ErrUnauthorized
+	}
+	return user, nil
 }

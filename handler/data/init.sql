@@ -13,12 +13,13 @@ DO $$
 
 -- Table tasks
 CREATE TABLE IF NOT EXISTS public.tasks (
-                                            id bigserial PRIMARY KEY,
+                                            id BIGSERIAL PRIMARY KEY,
                                             title TEXT NOT NULL,
                                             description TEXT NOT NULL,
                                             status status NOT NULL DEFAULT 'created',
-                                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                                            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                                            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                                            creator BIGINT NOT NULL REFERENCES public.users(id) ON DELETE CASCADE
 );
 
 
@@ -31,18 +32,6 @@ CREATE TABLE IF NOT EXISTS public.users (
                                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                                             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-
-
-
-
--- Table user_tasks
-CREATE TABLE IF NOT EXISTS public.user_tasks (
-                                                 user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                                                 task_id bigint NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-                                                 PRIMARY KEY (user_id, task_id)
-);
-
-
 
 -- Auto update updated_at function
 CREATE OR REPLACE FUNCTION update_timestamp()
@@ -68,7 +57,7 @@ EXECUTE FUNCTION update_timestamp();
 CREATE OR REPLACE FUNCTION unset_default_tasks_if_deleted()
     RETURNS TRIGGER AS $$
 BEGIN
-    -- логика
+
     RETURN OLD;
 END;
 $$ LANGUAGE plpgsql;

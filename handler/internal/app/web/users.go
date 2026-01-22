@@ -153,7 +153,6 @@ func UserEndpoint(router fiber.Router, usersUC users.UserUC) {
 	}
 
 	user := router.Group("/")
-	//	user.Post("/new", ctrl.create)
 	user.Get("/", ctrl.list)
 	user.Get("/:id", ctrl.get)
 	user.Delete("/:id", ctrl.delete)
