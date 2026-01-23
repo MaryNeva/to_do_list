@@ -5,9 +5,16 @@ import (
 	"time"
 )
 
-const StatusCreated = "created"
-const StatusInProgress = "in_progress"
-const StatusCompleted = "completed"
+const (
+	StatusCreated    = "created"
+	StatusInProgress = "in_progress"
+	StatusCompleted  = "completed"
+)
+
+const (
+	MessageReminder        = "The deadline will expire in "
+	MessageExpired  string = "The deadline has expired"
+)
 
 type Task struct {
 	Id          int
@@ -16,7 +23,13 @@ type Task struct {
 	Status      string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	Deadline    Deadline
 	Creator     int
+}
+
+type Deadline struct {
+	Message    string
+	DeadlineAt *time.Time
 }
 
 type TaskUC interface {

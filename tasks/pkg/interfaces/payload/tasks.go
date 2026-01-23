@@ -13,7 +13,13 @@ type Task struct {
 	Status      string    `json:"status"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	Deadline    Deadline  `json:"deadline,omitempty"`
 	Creator     int       `json:"creator"`
+}
+
+type Deadline struct {
+	Message    string     `json:"message,omitempty"`
+	DeadlineAt *time.Time `json:"deadline_at,omitempty"`
 }
 
 type List struct {
@@ -38,7 +44,11 @@ func ToTaskDomain(task Task) domain.Task {
 		Status:      task.Status,
 		CreatedAt:   task.CreatedAt,
 		UpdatedAt:   task.UpdatedAt,
-		Creator:     task.Creator,
+		Deadline: domain.Deadline{
+			Message:    task.Deadline.Message,
+			DeadlineAt: task.Deadline.DeadlineAt,
+		},
+		Creator: task.Creator,
 	}
 }
 
@@ -50,6 +60,10 @@ func ToTaskPayload(task domain.Task) Task {
 		Status:      task.Status,
 		CreatedAt:   task.CreatedAt,
 		UpdatedAt:   task.UpdatedAt,
-		Creator:     task.Creator,
+		Deadline: Deadline{
+			Message:    task.Deadline.Message,
+			DeadlineAt: task.Deadline.DeadlineAt,
+		},
+		Creator: task.Creator,
 	}
 }

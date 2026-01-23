@@ -2,10 +2,13 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	tasks "to-do-list.com/tasks/pkg/domain"
 )
+
+var timeReminder = 24 * time.Hour
 
 type taskStore struct {
 	store    tasks.TaskStore
@@ -27,11 +30,25 @@ func (t *taskStore) GetTask(ctx context.Context, id, creator int) (tasks.Task, e
 		return tasks.Task{}, err
 	}
 
+	CheckDeadline(&task)
+
 	return task, nil
 }
 
-func (t *taskStore) CreateTask(ctx context.Context, task tasks.Task) (tasks.Task, error) {
-	return t.store.CreateTask(ctx, task)
+func (t *taskStore) CreateTask(ctx context.Context, req tasks.Task) (tasks.Task, error) {
+	task, err := t.store.CreateTask(ctx, req)
+	if err != nil {
+		return tasks.Task{}, err
+	}
+
+	result, err := t.store.ReadTaskById(ctx, task.Id, task.Creator)
+	if err != nil {
+		return tasks.Task{}, err
+	}
+
+	CheckDeadline(&task)
+
+	return result, nil
 }
 
 func (t *taskStore) UpdateTask(ctx context.Context, id, creator int, task tasks.Task) (tasks.Task, error) {
@@ -80,4 +97,37 @@ func nextStatus(current string) string {
 	default:
 		return tasks.StatusCreated
 	}
+}
+
+func CheckDeadline(task *tasks.Task) {
+	now := time.Now()
+	if task.Deadline.DeadlineAt == nil {
+		return
+	}
+
+	deadline := *task.Deadline.DeadlineAt
+
+	switch {
+	case now.After(deadline):
+		task.Deadline.Message = tasks.MessageExpired
+	case deadline.Sub(now) <= timeReminder:
+		task.Deadline.Message = tasks.MessageReminder + FormatRemainingTime(deadline)
+	default:
+		task.Deadline.Message = ""
+	}
+}
+
+func FormatRemainingTime(deadline time.Time) string {
+	now := time.Now()
+	if now.After(deadline) {
+		return "Deadline expired"
+	}
+
+	remaining := deadline.Sub(now) // time.Duration
+
+	hours := int(remaining.Hours())
+	minutes := int(remaining.Minutes()) % 60
+	seconds := int(remaining.Seconds()) % 60
+
+	return fmt.Sprintf("%dh %dm %ds", hours, minutes, seconds)
 }

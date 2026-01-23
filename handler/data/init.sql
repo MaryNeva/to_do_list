@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS public.tasks (
                                             status status NOT NULL DEFAULT 'created',
                                             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                                             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                                            deadline_at TIMESTAMP,
                                             creator BIGINT NOT NULL REFERENCES public.users(id) ON DELETE CASCADE
 );
 

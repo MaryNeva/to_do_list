@@ -13,16 +13,34 @@ Authorization: Bearer {{token}}
 
 {
   "title": "Note",
-  "description": "bla bla bla"
-
+  "description": "bla bla bla",
+  "deadline": {
+    "deadline_at": "2026-01-22T16:57:00Z"
+  }
 }
 
 > {%
     client.global.set("id", response.body.id);
 %}
 
+### Create Task
+POST {{url}}/tasks/new
+Accept: Application/json
+Content-Type: Application/json
+Authorization: Bearer {{token}}
+
+{
+  "title": "Note2",
+  "description": "la la land"
+}
+
+> {%
+    client.global.set("id", response.body.id);
+%}
+
+
 ### Get Task
-GET {{url}}/tasks/4
+GET {{url}}/tasks/23
 Accept: Application/json
 Content-Type: Application/json
 Authorization: Bearer {{token}}
@@ -39,7 +57,7 @@ Authorization: Bearer {{token}}
 }
 
 ### Delete Task
-DELETE {{url}}/tasks/3
+DELETE {{url}}/tasks/2
 Accept: Application/json
 Content-Type: Application/json
 Authorization: Bearer {{token}}

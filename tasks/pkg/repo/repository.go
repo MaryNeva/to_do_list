@@ -75,6 +75,14 @@ func (t *tasksStorePostgres) CreateTask(ctx context.Context, task domain.Task) (
 		return domain.Task{}, err
 	}
 
+	if task.Deadline.DeadlineAt != nil {
+		query = fmt.Sprintf("UPDATE %s SET deadline_at = $1 RETURNING deadline_at", tableTasks)
+		err = t.db.QueryRow(ctx, query, model.DeadlineAt).Scan(&model.DeadlineAt)
+		if err != nil {
+			return domain.Task{}, err
+		}
+	}
+
 	return toTaskDomain(model), nil
 }
 
