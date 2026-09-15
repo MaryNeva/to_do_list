@@ -15,9 +15,9 @@ func HealthHandler() fiber.Handler {
 	}
 }
 
-func ReadyHandler(ping Pinger) fiber.Handler {
+func ReadyHandler(ping Pinger, timeout time.Duration) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		ctx, cancel := context.WithTimeout(c.Context(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(c.Context(), timeout)
 		defer cancel()
 
 		if err := ping(ctx); err != nil {

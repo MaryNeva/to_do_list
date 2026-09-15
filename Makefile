@@ -8,7 +8,7 @@ DATABASE_URL ?= postgres://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_
 
 .PHONY: run build test test-integration cover lint fmt vet tidy \
         migrate-up migrate-down migrate-create \
-        docker-up docker-down docker-logs gen-admin-hash
+        docker-up docker-down docker-logs gen-admin-hash smoke-test
 
 run: ## Run the API locally (reads .env)
 	go run ./cmd/server
@@ -48,13 +48,16 @@ migrate-create: ## Create a new migration pair: make migrate-create name=add_foo
 	go run github.com/golang-migrate/migrate/v4/cmd/migrate@$(MIGRATE_VERSION) create -ext sql -dir $(MIGRATIONS_DIR) -seq $(name)
 
 docker-up: ## Build and start the app + Postgres via docker compose
-	docker compose -f deployments/docker-compose.yml --env-file .env up --build -d
+	docker compose up --build -d
 
 docker-down: ## Stop and remove the docker compose stack
-	docker compose -f deployments/docker-compose.yml --env-file .env down
+	docker compose down
 
 docker-logs: ## Tail the app container's logs
-	docker compose -f deployments/docker-compose.yml logs -f app
+	docker compose logs -f app
 
 gen-admin-hash: ## Hash a password for ADMIN_PASSWORD_HASH: make gen-admin-hash pass='...'
 	@go run ./cmd/hashpw $(pass)
+
+smoke-test: ## Start the full stack (db + migrations + app) and verify register/login/task CRUD against real Postgres
+	@./scripts/smoke-test.sh

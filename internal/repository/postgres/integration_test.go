@@ -46,7 +46,7 @@ func setupTestPool(t *testing.T) *pgxpool.Pool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	pool, err := NewPool(ctx, dsn)
+	pool, err := NewPool(ctx, dsn, 5*time.Second)
 	if err != nil {
 		t.Fatalf("connect to test database: %v", err)
 	}
@@ -151,8 +151,12 @@ func TestTaskRepository_ToggleAndDelete(t *testing.T) {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
-	if err := repo.UpdateStatus(ctx, task.ID, domain.StatusInProgress); err != nil {
-		t.Fatalf("UpdateStatus() unexpected error: %v", err)
+	moved, err := repo.CompareAndSetStatus(ctx, task.ID, user.ID, domain.StatusCreated, domain.StatusInProgress)
+	if err != nil {
+		t.Fatalf("CompareAndSetStatus() unexpected error: %v", err)
+	}
+	if moved.Status != domain.StatusInProgress {
+		t.Fatalf("returned Status = %q, want %q", moved.Status, domain.StatusInProgress)
 	}
 	got, err := repo.GetByID(ctx, task.ID)
 	if err != nil {

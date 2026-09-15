@@ -271,8 +271,11 @@ components:
       type: object
       required: [username, email, password]
       properties:
+        # Lengths are counted in Unicode characters, not bytes.
         username: { type: string, minLength: 3, maxLength: 50 }
         email: { type: string, format: email }
+        # minLength is in characters; maxLength is bcrypt's 72-BYTE limit,
+        # so a password of multi-byte characters may be rejected sooner.
         password: { type: string, minLength: 8, maxLength: 72 }
 
     LoginRequest:
@@ -310,14 +313,18 @@ components:
       type: object
       description: Every field is optional; omitted fields are left unchanged.
       properties:
+        # Lengths are counted in Unicode characters, not bytes.
         username: { type: string, minLength: 3, maxLength: 50 }
         email: { type: string, format: email }
+        # minLength is in characters; maxLength is bcrypt's 72-BYTE limit,
+        # so a password of multi-byte characters may be rejected sooner.
         password: { type: string, minLength: 8, maxLength: 72 }
 
     CreateTaskRequest:
       type: object
       required: [title]
       properties:
+        # Lengths are counted in Unicode characters, not bytes.
         title: { type: string, minLength: 1, maxLength: 200 }
         description: { type: string, maxLength: 4000 }
 
@@ -325,6 +332,7 @@ components:
       type: object
       required: [title]
       properties:
+        # Lengths are counted in Unicode characters, not bytes.
         title: { type: string, minLength: 1, maxLength: 200 }
         description: { type: string, maxLength: 4000 }
 

@@ -17,14 +17,21 @@ import (
 )
 
 type Config struct {
-	CORSAllowOrigins string
-	ReadTimeout      time.Duration
-	WriteTimeout     time.Duration
+	AppName                  string
+	ReadTimeout              time.Duration
+	WriteTimeout             time.Duration
+	CORSAllowOrigins         string
+	CORSAllowMethods         string
+	CORSAllowHeaders         string
+	RateLimitAuthMaxRequests int
+	RateLimitAuthWindow      time.Duration
+	// HealthReadyTimeout budgets the database ping behind GET /readyz.
+	HealthReadyTimeout time.Duration
 }
 
 func New(cfg Config, logger *slog.Logger, authSvc domain.AuthService, taskSvc domain.TaskService, userSvc domain.UserService, dbPing httpapi.Pinger) *fiber.App {
 	app := fiber.New(fiber.Config{
-		AppName:      "to-do-list",
+		AppName:      cfg.AppName,
 		ErrorHandler: httpapi.NewErrorHandler(logger),
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
@@ -34,8 +41,8 @@ func New(cfg Config, logger *slog.Logger, authSvc domain.AuthService, taskSvc do
 	app.Use(requestid.New())
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: cfg.CORSAllowOrigins,
-		AllowHeaders: "Origin, Content-Type, Accept, Authorization",
-		AllowMethods: "GET, POST, PATCH, DELETE, OPTIONS",
+		AllowHeaders: cfg.CORSAllowHeaders,
+		AllowMethods: cfg.CORSAllowMethods,
 	}))
 	app.Use(appmiddleware.RequestLogger(logger))
 	app.Use(func(c *fiber.Ctx) error {
@@ -44,13 +51,13 @@ func New(cfg Config, logger *slog.Logger, authSvc domain.AuthService, taskSvc do
 	})
 
 	app.Get("/healthz", httpapi.HealthHandler())
-	app.Get("/readyz", httpapi.ReadyHandler(dbPing))
+	app.Get("/readyz", httpapi.ReadyHandler(dbPing, cfg.HealthReadyTimeout))
 
 	authMiddleware := appmiddleware.Auth(authSvc)
 
 	authLimiter := limiter.New(limiter.Config{
-		Max:        20,
-		Expiration: time.Minute,
+		Max:        cfg.RateLimitAuthMaxRequests,
+		Expiration: cfg.RateLimitAuthWindow,
 	})
 
 	v1 := app.Group("/api/v1")

@@ -52,12 +52,16 @@ internal/
       dto/        request/response JSON shapes (never expose PasswordHash)
     httpserver/   assembles the fiber app + routes (kept separate from
                   transport/http to avoid an import cycle with handler)
-  config/         env-based configuration + validation
+  config/         configuration loading (config.yaml -> .env -> env vars) + validation
   logger/         slog setup
   apperr/         transport-agnostic sentinel errors (apperr.ErrNotFound, ...)
 
+config.yaml       non-secret settings, safe to commit (see Configuration below)
+.env.example      secrets template - copy to .env, which is git-ignored
+docker-compose.yml  Postgres + the app, for local/demo deployment
 migrations/       golang-migrate SQL migrations
-deployments/      Dockerfile + docker-compose.yml
+deployments/      Dockerfile
+scripts/          smoke-test.sh: end-to-end check against the running stack
 docs/openapi.yaml OpenAPI 3 spec
 api/*.http        example requests (IntelliJ HTTP Client / VS Code REST Client)
 ```
@@ -75,6 +79,8 @@ cases and handlers with in-memory fakes instead of a real database (see the
 cp .env.example .env
 # edit .env: set DB_PASSWORD and JWT_SECRET at minimum
 #   openssl rand -base64 48   # good way to generate JWT_SECRET
+# everything else (ports, timeouts, log level, ...) already has a sensible
+# default in config.yaml - see Configuration below.
 
 make docker-up
 curl http://localhost:8080/healthz
@@ -83,14 +89,33 @@ curl http://localhost:8080/healthz
 This builds the API image and starts it alongside Postgres; migrations run
 automatically on startup. Tear it down with `make docker-down`.
 
+To verify the whole stack actually works end to end - not just that the
+containers start, but that registration, login and task CRUD really hit
+Postgres - run:
+
+```bash
+make smoke-test
+```
+
+`scripts/smoke-test.sh` starts the stack (skip with `--no-up` if it's
+already running), waits for `/readyz`, then drives the real HTTP API:
+registers a user, logs in, rejects a wrong password and an unauthenticated
+request, creates a task, checks the row exists in `tasks` via `psql` inside
+the `db` container (joined to the right user by `creator_id`, not just
+trusted from the API response), toggles its status, deletes it, and checks
+it is gone from both the API and the database. It exits non-zero and prints
+the app/db logs if anything fails. Add `--down` to stop the stack
+afterwards.
+
 ## Local development (without Docker)
 
 Requires Go 1.24+ and a Postgres instance.
 
 ```bash
 cp .env.example .env
-# point DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME at your Postgres,
-# and set JWT_SECRET
+# set DB_PASSWORD and JWT_SECRET; if your Postgres is not on
+# localhost:5432, either edit db.host/db.port in config.yaml or override
+# DB_HOST/DB_PORT in .env
 
 go mod tidy   # fetches dependencies - needs network access
 make run      # or: go run ./cmd/server
@@ -128,43 +153,98 @@ Full request/response shapes are in [`docs/openapi.yaml`](docs/openapi.yaml).
 
 ## Configuration
 
-Everything is configured through environment variables (optionally loaded
-from a local `.env` file - see `.env.example`). `Load()`
-(`internal/config/config.go`) validates these at startup and refuses to
-start with an invalid configuration rather than failing confusingly later.
+Every setting lives in **`config.yaml`** at the project root. There are no
+defaults compiled into the Go code: if a key is missing there and no
+environment variable supplies it, the service refuses to start and names the
+key. That keeps one file as the answer to "what does this service actually
+run with".
 
-| Variable | Default | Notes |
+Values are resolved from three sources, lowest priority first:
+
+1. **`config.yaml`** - every non-secret setting. Committed to git.
+2. **`.env`** - secrets and per-machine overrides. Git-ignored (copy
+   `.env.example`).
+3. **Real environment variables** - always win. This is how
+   `docker-compose.yml` points the container at `DB_HOST=db`.
+
+An empty environment variable counts as "not set", so
+`docker-compose.yml` can pass optional overrides through as
+`LOG_LEVEL: ${LOG_LEVEL:-}` without blanking what `config.yaml` says.
+
+### Secrets
+
+These four are **never** read from `config.yaml`, only from `.env` or the
+environment, so the committed file cannot leak one:
+
+| Variable | Notes |
+|---|---|
+| `DB_PASSWORD` | Required |
+| `JWT_SECRET` | Required, at least `jwt.min_secret_length` characters |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` | Optional superadmin login, see below |
+
+### Settings in `config.yaml`
+
+Each one can be overridden by the environment variable in the right-hand
+column.
+
+| `config.yaml` key | Value | Environment override |
 |---|---|---|
-| `APP_ENV` | `development` | Informational only |
-| `SERVER_ADDRESS` | `:8080` | |
-| `SERVER_READ_TIMEOUT` / `SERVER_WRITE_TIMEOUT` | `10s` | |
-| `SERVER_SHUTDOWN_TIMEOUT` | `15s` | Grace period for in-flight requests on SIGTERM/SIGINT |
-| `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` | `localhost` / `5432` / `to_do` / `postgres` / *(required)* | |
-| `DB_SSLMODE` | `disable` | Use `require` (or stricter) against a real deployment |
-| `JWT_SECRET` | *(required, ≥32 chars)* | Signs and verifies access tokens |
-| `JWT_TTL` | `1h` | Access token lifetime |
-| `JWT_ISSUER` | `to-do-list` | `iss` claim |
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` | *(empty = disabled)* | Bootstrap admin login, see below. Generate the hash with `make gen-admin-hash pass='...'` |
-| `CORS_ALLOW_ORIGINS` | `*` | Comma-separated origins |
-| `RUN_MIGRATIONS` | `true` | Apply pending migrations on startup |
-| `MIGRATIONS_PATH` | `migrations` | |
-| `LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error` |
-| `LOG_FORMAT` | `json` | `json` or `text` |
+| `app.name` | `to-do-list` | `APP_NAME` |
+| `app.env` | `development` | `APP_ENV` |
+| `server.address` | `:8080` | `SERVER_ADDRESS` |
+| `server.read_timeout` / `server.write_timeout` | `10s` | `SERVER_READ_TIMEOUT` / `SERVER_WRITE_TIMEOUT` |
+| `server.shutdown_timeout` | `15s` | `SERVER_SHUTDOWN_TIMEOUT` |
+| `db.host` / `db.port` / `db.name` / `db.user` | `localhost` / `5432` / `to_do` / `postgres` | `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` |
+| `db.sslmode` | `disable` | `DB_SSLMODE` |
+| `db.connect_timeout` | `5s` | `DB_CONNECT_TIMEOUT` |
+| `db.call_timeout` | `5s` | `DB_CALL_TIMEOUT` |
+| `jwt.ttl` | `1h` | `JWT_TTL` |
+| `jwt.issuer` | `to-do-list` | `JWT_ISSUER` |
+| `jwt.min_secret_length` | `32` | `JWT_MIN_SECRET_LENGTH` |
+| `password.bcrypt_cost` | `12` | `PASSWORD_BCRYPT_COST` |
+| `password.min_length` | `8` | `PASSWORD_MIN_LENGTH` |
+| `user.min_username_length` / `user.max_username_length` | `3` / `50` | `USER_MIN_USERNAME_LENGTH` / `USER_MAX_USERNAME_LENGTH` |
+| `task.max_title_length` | `200` | `TASK_MAX_TITLE_LENGTH` |
+| `task.max_description_length` | `4000` | `TASK_MAX_DESCRIPTION_LENGTH` |
+| `ratelimit.auth_max_requests` / `ratelimit.auth_window` | `20` / `1m` | `RATELIMIT_AUTH_MAX_REQUESTS` / `RATELIMIT_AUTH_WINDOW` |
+| `cors.allow_origins` / `allow_methods` / `allow_headers` | `*` / methods / headers | `CORS_ALLOW_ORIGINS` / `CORS_ALLOW_METHODS` / `CORS_ALLOW_HEADERS` |
+| `health.ready_timeout` | `2s` | `HEALTH_READY_TIMEOUT` |
+| `log.level` / `log.format` | `info` / `json` | `LOG_LEVEL` / `LOG_FORMAT` |
+| `run_migrations` | `true` | `RUN_MIGRATIONS` |
+| `migrations_path` | `migrations` | `MIGRATIONS_PATH` |
 
-### Bootstrap admin login
+`config.yaml` is copied into the Docker image (see `deployments/Dockerfile`),
+because without it the service has no settings at all.
 
-Before any real user exists, you can log in as an operator-configured admin:
+### What stays in the code
+
+A few values are properties of an algorithm or protocol rather than choices a
+deployment gets to make, so they are constants, not settings: bcrypt's
+72-byte password limit (`password.MaxLength`), Postgres' `23505`
+unique-violation code, and the `Bearer ` authorization prefix. Making those
+configurable would only let a deployment configure itself into a bug.
+
+Policy that *is* configurable but cannot live in a struct tag - username and
+password lengths, task title/description limits - is enforced in the
+use-case layer instead, because `validate:"max=200"` tags are compile-time
+constants and cannot read `config.yaml`.
+
+### Superadmin / bootstrap admin login
+
+Before any real user exists, you can log in as an operator-configured
+superadmin - a login that isn't a row in the `users` table at all:
 
 ```bash
 make gen-admin-hash pass='a strong admin password'
-# put the output in ADMIN_PASSWORD_HASH, and a username in ADMIN_USERNAME
+# put the output in ADMIN_PASSWORD_HASH, and a username in ADMIN_USERNAME,
+# both in .env (or as real environment variables, e.g. in docker-compose.yml)
 ```
 
 Logging in with that username checks the password against
 `ADMIN_PASSWORD_HASH` instead of the `users` table and issues a token with
 `is_admin: true`. An admin token can list/read/update/delete *any* user
 (`GET /api/v1/users`, etc.) but has no rows of its own in the `tasks` table.
-Leave both variables empty to disable this entirely.
+Leave both variables empty (the default) to disable this entirely.
 
 ## Testing
 
@@ -186,6 +266,10 @@ make docker-up   # brings up Postgres (and the app)
 TEST_DATABASE_URL="postgres://postgres:<password>@localhost:5432/to_do?sslmode=disable" \
   make test-integration
 ```
+
+For a full black-box check against the running Docker stack - HTTP API in,
+Postgres rows out - see `make smoke-test` under
+[Quick start](#quick-start-docker).
 
 ## Notable design decisions
 

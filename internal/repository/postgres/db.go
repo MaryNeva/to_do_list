@@ -10,14 +10,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// uniqueViolationCode is the Postgres error code for a unique_violation
-// (see https://www.postgresql.org/docs/current/errcodes-appendix.html).
 const uniqueViolationCode = "23505"
 
-// NewPool opens a connection pool and verifies it can actually reach the
-// database before returning, so startup fails fast with a clear error
-// instead of the first request timing out.
-func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+func NewPool(ctx context.Context, dsn string, connectTimeout time.Duration) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: parse dsn: %w", err)
@@ -28,7 +23,7 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("postgres: create pool: %w", err)
 	}
 
-	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	pingCtx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
 
 	if err := pool.Ping(pingCtx); err != nil {
