@@ -1,3 +1,19 @@
-configs
-.idea
-handler/.env
+# Secrets / local config
+.env
+
+# Build artifacts
+/bin/
+/tmp/
+*.exe
+
+# Test / coverage output
+coverage.out
+coverage.html
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store

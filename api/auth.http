@@ -1,0 +1,34 @@
+### Variables (IntelliJ HTTP Client / VS Code REST Client both understand this file)
+@host = http://localhost:8080
+@api = {{host}}/api/v1
+
+### Register a new user
+POST {{api}}/auth/register
+Content-Type: application/json
+
+{
+  "username": "alice",
+  "email": "alice@example.com",
+  "password": "s3cret-password"
+}
+
+### Log in - copy the "token" from the response into auth-token below
+POST {{api}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "alice",
+  "password": "s3cret-password"
+}
+
+### Who am I? (requires a token from /auth/login)
+@token = paste-token-here
+
+GET {{api}}/auth/me
+Authorization: Bearer {{token}}
+
+### Health check (no auth required)
+GET {{host}}/healthz
+
+### Readiness check - also pings the database
+GET {{host}}/readyz
