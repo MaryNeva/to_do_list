@@ -139,13 +139,39 @@ func (r *TaskRepository) Delete(ctx context.Context, id int64) error {
 	return nil
 }
 
-func (r *TaskRepository) UpdateStatus(ctx context.Context, id int64, status domain.TaskStatus) error {
-	tag, err := r.pool.Exec(ctx, `UPDATE tasks SET status = $2 WHERE id = $1`, id, string(status))
+func (r *TaskRepository) CompareAndSetStatus(ctx context.Context, id, ownerID int64, from, to domain.TaskStatus) (domain.Task, error) {
+	query := `UPDATE tasks SET status = $4
+	          WHERE id = $1 AND creator_id = $2 AND status = $3
+	          RETURNING ` + taskColumns
+
+	rows, err := r.pool.Query(ctx, query, id, ownerID, string(from), string(to))
 	if err != nil {
-		return fmt.Errorf("postgres: update task status: %w", err)
+		return domain.Task{}, fmt.Errorf("postgres: compare-and-set task status: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	defer rows.Close()
+
+	model, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByName[taskModel])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Task{}, r.classifyMissedTransition(ctx, id, ownerID)
+		}
+		return domain.Task{}, fmt.Errorf("postgres: scan task after status change: %w", err)
+	}
+
+	return model.toDomain(), nil
+}
+
+func (r *TaskRepository) classifyMissedTransition(ctx context.Context, id, ownerID int64) error {
+	var creatorID int64
+	err := r.pool.QueryRow(ctx, `SELECT creator_id FROM tasks WHERE id = $1`, id).Scan(&creatorID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
 		return apperr.ErrNotFound
+	case err != nil:
+		return fmt.Errorf("postgres: inspect task after failed status change: %w", err)
+	case creatorID != ownerID:
+		return apperr.ErrNotFound
+	default:
+		return apperr.ErrConflict
 	}
-	return nil
 }

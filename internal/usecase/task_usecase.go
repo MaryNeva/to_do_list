@@ -2,40 +2,43 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"to-do-list/internal/apperr"
 	"to-do-list/internal/domain"
 )
 
-const (
-	maxTaskTitleLen = 200
-	maxTaskDescLen  = 4000
-)
-
-type TaskUseCase struct {
-	repo    domain.TaskRepository
-	timeout time.Duration
-	logger  *slog.Logger
+type TaskConfig struct {
+	Timeout              time.Duration
+	MaxTitleLength       int
+	MaxDescriptionLength int
 }
 
-func NewTaskUseCase(repo domain.TaskRepository, timeout time.Duration, logger *slog.Logger) *TaskUseCase {
-	return &TaskUseCase{repo: repo, timeout: timeout, logger: logger}
+type TaskUseCase struct {
+	repo   domain.TaskRepository
+	cfg    TaskConfig
+	logger *slog.Logger
+}
+
+func NewTaskUseCase(repo domain.TaskRepository, cfg TaskConfig, logger *slog.Logger) *TaskUseCase {
+	return &TaskUseCase{repo: repo, cfg: cfg, logger: logger}
 }
 
 var _ domain.TaskService = (*TaskUseCase)(nil)
 
 func (uc *TaskUseCase) Create(ctx context.Context, creatorID int64, title, description string) (domain.Task, error) {
-	ctx, cancel := context.WithTimeout(ctx, uc.timeout)
+	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
 	title = strings.TrimSpace(title)
 	description = strings.TrimSpace(description)
 
-	if err := validateTaskFields(title, description); err != nil {
+	if err := uc.validateTaskFields(title, description); err != nil {
 		return domain.Task{}, err
 	}
 
@@ -56,7 +59,7 @@ func (uc *TaskUseCase) Create(ctx context.Context, creatorID int64, title, descr
 }
 
 func (uc *TaskUseCase) Get(ctx context.Context, requesterID, id int64) (domain.Task, error) {
-	ctx, cancel := context.WithTimeout(ctx, uc.timeout)
+	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
 	task, err := uc.repo.GetByID(ctx, id)
@@ -72,7 +75,7 @@ func (uc *TaskUseCase) Get(ctx context.Context, requesterID, id int64) (domain.T
 }
 
 func (uc *TaskUseCase) List(ctx context.Context, requesterID int64) ([]domain.Task, error) {
-	ctx, cancel := context.WithTimeout(ctx, uc.timeout)
+	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
 	tasks, err := uc.repo.ListByCreator(ctx, requesterID)
@@ -85,13 +88,13 @@ func (uc *TaskUseCase) List(ctx context.Context, requesterID int64) ([]domain.Ta
 }
 
 func (uc *TaskUseCase) Update(ctx context.Context, requesterID, id int64, title, description string) (domain.Task, error) {
-	ctx, cancel := context.WithTimeout(ctx, uc.timeout)
+	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
 	title = strings.TrimSpace(title)
 	description = strings.TrimSpace(description)
 
-	if err := validateTaskFields(title, description); err != nil {
+	if err := uc.validateTaskFields(title, description); err != nil {
 		return domain.Task{}, err
 	}
 
@@ -116,7 +119,7 @@ func (uc *TaskUseCase) Update(ctx context.Context, requesterID, id int64, title,
 }
 
 func (uc *TaskUseCase) Delete(ctx context.Context, requesterID, id int64) error {
-	ctx, cancel := context.WithTimeout(ctx, uc.timeout)
+	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
 	existing, err := uc.repo.GetByID(ctx, id)
@@ -135,35 +138,51 @@ func (uc *TaskUseCase) Delete(ctx context.Context, requesterID, id int64) error 
 	return nil
 }
 
+const maxToggleAttempts = 50
+
 func (uc *TaskUseCase) ToggleStatus(ctx context.Context, requesterID, id int64) (domain.Task, error) {
-	ctx, cancel := context.WithTimeout(ctx, uc.timeout)
+	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
-	existing, err := uc.repo.GetByID(ctx, id)
-	if err != nil {
-		return domain.Task{}, err
-	}
-	if existing.CreatorID != requesterID {
-		return domain.Task{}, apperr.ErrNotFound
+	for attempt := 0; attempt < maxToggleAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return domain.Task{}, err
+		}
+
+		existing, err := uc.repo.GetByID(ctx, id)
+		if err != nil {
+			return domain.Task{}, err
+		}
+		if existing.CreatorID != requesterID {
+			return domain.Task{}, apperr.ErrNotFound
+		}
+
+		updated, err := uc.repo.CompareAndSetStatus(ctx, id, requesterID, existing.Status, domain.NextStatus(existing.Status))
+		switch {
+		case err == nil:
+			return updated, nil
+		case errors.Is(err, apperr.ErrConflict):
+			continue // someone else moved it; retry from its new status
+		case errors.Is(err, apperr.ErrNotFound):
+			return domain.Task{}, err
+		default:
+			uc.logger.ErrorContext(ctx, "toggle task status failed", "error", err, "task_id", id)
+			return domain.Task{}, fmt.Errorf("toggle task status: %w", err)
+		}
 	}
 
-	next := domain.NextStatus(existing.Status)
-	if err := uc.repo.UpdateStatus(ctx, id, next); err != nil {
-		uc.logger.ErrorContext(ctx, "toggle task status failed", "error", err, "task_id", id)
-		return domain.Task{}, fmt.Errorf("toggle task status: %w", err)
-	}
-
-	return uc.repo.GetByID(ctx, id)
+	uc.logger.WarnContext(ctx, "toggle task status gave up after repeated conflicts", "task_id", id, "attempts", maxToggleAttempts)
+	return domain.Task{}, fmt.Errorf("%w: task status changed concurrently, try again", apperr.ErrConflict)
 }
 
-func validateTaskFields(title, description string) error {
+func (uc *TaskUseCase) validateTaskFields(title, description string) error {
 	switch {
 	case title == "":
 		return fmt.Errorf("%w: title is required", apperr.ErrValidation)
-	case len(title) > maxTaskTitleLen:
-		return fmt.Errorf("%w: title must be at most %d characters", apperr.ErrValidation, maxTaskTitleLen)
-	case len(description) > maxTaskDescLen:
-		return fmt.Errorf("%w: description must be at most %d characters", apperr.ErrValidation, maxTaskDescLen)
+	case utf8.RuneCountInString(title) > uc.cfg.MaxTitleLength:
+		return fmt.Errorf("%w: title must be at most %d characters", apperr.ErrValidation, uc.cfg.MaxTitleLength)
+	case utf8.RuneCountInString(description) > uc.cfg.MaxDescriptionLength:
+		return fmt.Errorf("%w: description must be at most %d characters", apperr.ErrValidation, uc.cfg.MaxDescriptionLength)
 	default:
 		return nil
 	}

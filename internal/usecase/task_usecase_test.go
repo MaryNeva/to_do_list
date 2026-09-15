@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"to-do-list/internal/apperr"
 	"to-do-list/internal/domain"
@@ -85,27 +86,38 @@ func (f *fakeTaskRepo) Delete(_ context.Context, id int64) error {
 	return nil
 }
 
-func (f *fakeTaskRepo) UpdateStatus(_ context.Context, id int64, status domain.TaskStatus) error {
+func (f *fakeTaskRepo) CompareAndSetStatus(_ context.Context, id, ownerID int64, from, to domain.TaskStatus) (domain.Task, error) {
 	if f.forceErr != nil {
-		return f.forceErr
+		return domain.Task{}, f.forceErr
 	}
 	task, ok := f.tasks[id]
-	if !ok {
-		return apperr.ErrNotFound
+	if !ok || task.CreatorID != ownerID {
+		return domain.Task{}, apperr.ErrNotFound
 	}
-	task.Status = status
+	if task.Status != from {
+		return domain.Task{}, apperr.ErrConflict
+	}
+	task.Status = to
 	task.UpdatedAt = time.Now()
 	f.tasks[id] = task
-	return nil
+	return task, nil
 }
 
 func silentLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+func testTaskConfig() TaskConfig {
+	return TaskConfig{
+		Timeout:              time.Second,
+		MaxTitleLength:       200,
+		MaxDescriptionLength: 4000,
+	}
+}
+
 func newTaskUseCaseForTest() (*TaskUseCase, *fakeTaskRepo) {
 	repo := newFakeTaskRepo()
-	return NewTaskUseCase(repo, time.Second, silentLogger()), repo
+	return NewTaskUseCase(repo, testTaskConfig(), silentLogger()), repo
 }
 
 func TestTaskUseCase_Create(t *testing.T) {
@@ -118,8 +130,8 @@ func TestTaskUseCase_Create(t *testing.T) {
 		{name: "valid task", title: "Buy milk", description: "2%"},
 		{name: "trims whitespace", title: "  Buy milk  ", description: "  2%  "},
 		{name: "empty title rejected", title: "   ", wantErr: apperr.ErrValidation},
-		{name: "title too long rejected", title: strings.Repeat("a", maxTaskTitleLen+1), wantErr: apperr.ErrValidation},
-		{name: "description too long rejected", title: "ok", description: strings.Repeat("a", maxTaskDescLen+1), wantErr: apperr.ErrValidation},
+		{name: "title too long rejected", title: strings.Repeat("a", testTaskConfig().MaxTitleLength+1), wantErr: apperr.ErrValidation},
+		{name: "description too long rejected", title: "ok", description: strings.Repeat("a", testTaskConfig().MaxDescriptionLength+1), wantErr: apperr.ErrValidation},
 	}
 
 	for _, tt := range tests {
@@ -223,7 +235,7 @@ func TestTaskUseCase_Delete_OwnershipEnforced(t *testing.T) {
 
 func TestTaskUseCase_ToggleStatus_Cycles(t *testing.T) {
 	uc, repo := newTaskUseCaseForTest()
-	owned, _ := repo.Create(context.Background(), domain.Task{Title: "mine", CreatorID: 1})
+	owned, _ := repo.Create(context.Background(), domain.Task{Title: "mine", CreatorID: 1, Status: domain.StatusCreated})
 
 	wantSequence := []domain.TaskStatus{
 		domain.StatusInProgress,
@@ -268,5 +280,108 @@ func TestTaskUseCase_List_ScopedToRequester(t *testing.T) {
 		if task.CreatorID != 1 {
 			t.Errorf("List() returned a task owned by %d, want only 1", task.CreatorID)
 		}
+	}
+}
+
+// TestTaskUseCase_Create_CountsCharactersNotBytes pins the Unicode boundary
+// for task text: the limits are stated in characters, so a title of 200
+// Cyrillic letters (400 bytes) or 200 emoji (800 bytes) must be accepted.
+func TestTaskUseCase_Create_CountsCharactersNotBytes(t *testing.T) {
+	cfg := testTaskConfig()
+
+	tests := []struct {
+		name        string
+		title       string
+		description string
+		wantErr     bool
+	}{
+		{"cyrillic title at the limit", strings.Repeat("я", cfg.MaxTitleLength), "", false},
+		{"cyrillic title one over", strings.Repeat("я", cfg.MaxTitleLength+1), "", true},
+		{"emoji title at the limit", strings.Repeat("🚀", cfg.MaxTitleLength), "", false},
+		{"emoji title one over", strings.Repeat("🚀", cfg.MaxTitleLength+1), "", true},
+		{"cyrillic description at the limit", "ok", strings.Repeat("я", cfg.MaxDescriptionLength), false},
+		{"cyrillic description one over", "ok", strings.Repeat("я", cfg.MaxDescriptionLength+1), true},
+		{"emoji description at the limit", "ok", strings.Repeat("🚀", cfg.MaxDescriptionLength), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			uc, _ := newTaskUseCaseForTest()
+
+			task, err := uc.Create(context.Background(), 1, tt.title, tt.description)
+			if tt.wantErr {
+				if !errors.Is(err, apperr.ErrValidation) {
+					t.Errorf("Create() with %d characters error = %v, want apperr.ErrValidation",
+						utf8.RuneCountInString(tt.title), err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Create() with %d characters (%d bytes) unexpected error: %v",
+					utf8.RuneCountInString(tt.title), len(tt.title), err)
+			}
+			if utf8.RuneCountInString(task.Title) != utf8.RuneCountInString(tt.title) {
+				t.Errorf("stored title has %d characters, want %d",
+					utf8.RuneCountInString(task.Title), utf8.RuneCountInString(tt.title))
+			}
+		})
+	}
+}
+
+// TestTaskUseCase_ToggleStatus_RetriesAfterConcurrentChange: when another
+// request moves the task first, the toggle must retry from the new status
+// instead of failing or skipping a transition.
+func TestTaskUseCase_ToggleStatus_RetriesAfterConcurrentChange(t *testing.T) {
+	repo := newFakeTaskRepo()
+	interfering := &interferingTaskRepo{fakeTaskRepo: repo}
+	uc := NewTaskUseCase(interfering, testTaskConfig(), silentLogger())
+
+	owned, _ := repo.Create(context.Background(), domain.Task{Title: "mine", CreatorID: 1, Status: domain.StatusCreated})
+
+	// The first compare-and-set is preceded by someone else moving the task
+	// created -> in_progress, so this call must land on in_progress ->
+	// completed rather than reporting a conflict.
+	interfering.before = func() {
+		task := repo.tasks[owned.ID]
+		task.Status = domain.StatusInProgress
+		repo.tasks[owned.ID] = task
+	}
+
+	got, err := uc.ToggleStatus(context.Background(), 1, owned.ID)
+	if err != nil {
+		t.Fatalf("ToggleStatus() unexpected error: %v", err)
+	}
+	if got.Status != domain.StatusCompleted {
+		t.Errorf("Status = %q, want %q", got.Status, domain.StatusCompleted)
+	}
+}
+
+// interferingTaskRepo runs a hook once, just before the first
+// compare-and-set, to simulate another request winning the race.
+type interferingTaskRepo struct {
+	*fakeTaskRepo
+	before func()
+}
+
+func (r *interferingTaskRepo) CompareAndSetStatus(ctx context.Context, id, ownerID int64, from, to domain.TaskStatus) (domain.Task, error) {
+	if r.before != nil {
+		hook := r.before
+		r.before = nil
+		hook()
+	}
+	return r.fakeTaskRepo.CompareAndSetStatus(ctx, id, ownerID, from, to)
+}
+
+// TestTaskUseCase_ToggleStatus_ForeignTaskStaysNotFound: the ownership check
+// must survive the move to a conditional update.
+func TestTaskUseCase_ToggleStatus_ForeignTaskStaysNotFound(t *testing.T) {
+	uc, repo := newTaskUseCaseForTest()
+	owned, _ := repo.Create(context.Background(), domain.Task{Title: "mine", CreatorID: 1, Status: domain.StatusCreated})
+
+	if _, err := uc.ToggleStatus(context.Background(), 2, owned.ID); !errors.Is(err, apperr.ErrNotFound) {
+		t.Errorf("ToggleStatus() by a different user error = %v, want apperr.ErrNotFound", err)
+	}
+	if repo.tasks[owned.ID].Status != domain.StatusCreated {
+		t.Errorf("a foreign toggle changed the status to %q", repo.tasks[owned.ID].Status)
 	}
 }

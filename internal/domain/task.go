@@ -43,7 +43,7 @@ type TaskRepository interface {
 	ListByCreator(ctx context.Context, creatorID int64) ([]Task, error)
 	Update(ctx context.Context, task Task) (Task, error)
 	Delete(ctx context.Context, id int64) error
-	UpdateStatus(ctx context.Context, id int64, status TaskStatus) error
+	CompareAndSetStatus(ctx context.Context, id, ownerID int64, from, to TaskStatus) (Task, error)
 }
 
 type TaskService interface {
