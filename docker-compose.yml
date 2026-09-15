@@ -1,0 +1,59 @@
+
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: todo_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      POSTGRES_DB: ${DB_NAME:-to_do}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - todo_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-to_do}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: deployments/Dockerfile
+    container_name: todo_app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+
+      # Container-specific: inside the compose network Postgres answers on
+      # the service name "db" at its own port 5432, whatever host port is
+      # published above. These must match the db service's POSTGRES_* values.
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-to_do}
+      DB_USER: ${DB_USER:-postgres}
+
+      # Secrets - never in config.yaml.
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      # Superadmin / bootstrap admin login, see the README section of the
+      # same name. Empty (the default) disables it.
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-}
+
+      # Optional overrides: empty means "whatever config.yaml says".
+      LOG_LEVEL: ${LOG_LEVEL:-}
+      LOG_FORMAT: ${LOG_FORMAT:-}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-}
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-}
+    ports:
+      # The container port must match server.address in config.yaml.
+      - "${SERVER_PORT:-8080}:8080"
+
+volumes:
+  todo_pgdata:
