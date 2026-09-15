@@ -61,6 +61,9 @@ func (r *UserRepository) Create(ctx context.Context, user domain.User) (domain.U
 
 	model, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByName[userModel])
 	if err != nil {
+		if isUniqueViolation(err) {
+			return domain.User{}, apperr.ErrConflict
+		}
 		return domain.User{}, fmt.Errorf("postgres: scan created user: %w", err)
 	}
 
@@ -129,21 +132,35 @@ func (r *UserRepository) List(ctx context.Context) ([]domain.User, error) {
 	return result, nil
 }
 
-func (r *UserRepository) Update(ctx context.Context, user domain.User) error {
-	query := `UPDATE users SET username = $1, email = $2, password_hash = $3 WHERE id = $4`
+func (r *UserRepository) Update(ctx context.Context, id int64, fields domain.UserUpdate) (domain.User, error) {
+	query := `UPDATE users
+	          SET username      = COALESCE($2, username),
+	              email         = COALESCE($3, email),
+	              password_hash = COALESCE($4, password_hash)
+	          WHERE id = $1
+	          RETURNING ` + userColumns
 
-	tag, err := r.pool.Exec(ctx, query, user.Username, user.Email, user.PasswordHash, user.ID)
+	rows, err := r.pool.Query(ctx, query, id, fields.Username, fields.Email, fields.PasswordHash)
 	if err != nil {
 		if isUniqueViolation(err) {
-			return apperr.ErrConflict
+			return domain.User{}, apperr.ErrConflict
 		}
-		return fmt.Errorf("postgres: update user: %w", err)
+		return domain.User{}, fmt.Errorf("postgres: update user: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return apperr.ErrNotFound
+	defer rows.Close()
+
+	model, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByName[userModel])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.User{}, apperr.ErrNotFound
+		}
+		if isUniqueViolation(err) {
+			return domain.User{}, apperr.ErrConflict
+		}
+		return domain.User{}, fmt.Errorf("postgres: scan updated user: %w", err)
 	}
 
-	return nil
+	return model.toDomain(), nil
 }
 
 func (r *UserRepository) Delete(ctx context.Context, id int64) error {

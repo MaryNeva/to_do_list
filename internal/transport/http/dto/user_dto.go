@@ -8,9 +8,9 @@ import (
 )
 
 type UpdateUserRequest struct {
-	Username string `json:"username" validate:"omitempty,min=3,max=50"`
+	Username string `json:"username"`
 	Email    string `json:"email" validate:"omitempty,email"`
-	Password string `json:"password" validate:"omitempty,min=8,max=72"`
+	Password string `json:"password"`
 }
 
 type UserResponse struct {

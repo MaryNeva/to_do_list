@@ -20,12 +20,18 @@ type Claims struct {
 	IsAdmin  bool
 }
 
+type UserUpdate struct {
+	Username     *string
+	Email        *string
+	PasswordHash *string
+}
+
 type UserRepository interface {
 	Create(ctx context.Context, user User) (User, error)
 	GetByID(ctx context.Context, id int64) (User, error)
 	GetByUsername(ctx context.Context, username string) (User, error)
 	List(ctx context.Context) ([]User, error)
-	Update(ctx context.Context, user User) error
+	Update(ctx context.Context, id int64, fields UserUpdate) (User, error)
 	Delete(ctx context.Context, id int64) error
 }
 
