@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"to-do-list/internal/auth/password"
+	"to-do-list/internal/config"
 )
 
 func main() {
@@ -30,7 +31,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	hash, err := password.Hash(plain)
+	cost, err := config.PasswordHashingCost(config.DefaultConfigPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "read password.bcrypt_cost from config.yaml:", err)
+		os.Exit(1)
+	}
+
+	hasher, err := password.NewHasher(cost)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "build password hasher:", err)
+		os.Exit(1)
+	}
+
+	hash, err := hasher.Hash(plain)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "hash password:", err)
 		os.Exit(1)

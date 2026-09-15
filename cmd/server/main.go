@@ -8,12 +8,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres" // migration driver, registered via side-effect import
 	_ "github.com/golang-migrate/migrate/v4/source/file"       // migration source, registered via side-effect import
 
+	"to-do-list/internal/auth/password"
 	"to-do-list/internal/auth/token"
 	"to-do-list/internal/config"
 	"to-do-list/internal/logger"
@@ -21,8 +21,6 @@ import (
 	"to-do-list/internal/transport/httpserver"
 	"to-do-list/internal/usecase"
 )
-
-const dbCallTimeout = 5 * time.Second
 
 func main() {
 	cfg, err := config.Load()
@@ -50,7 +48,7 @@ func run(cfg config.Config, log *slog.Logger) error {
 		}
 	}
 
-	pool, err := postgres.NewPool(ctx, cfg.DatabaseDSN())
+	pool, err := postgres.NewPool(ctx, cfg.DatabaseDSN(), cfg.DBConnectTimeout)
 	if err != nil {
 		return fmt.Errorf("connect to database: %w", err)
 	}
@@ -61,20 +59,50 @@ func run(cfg config.Config, log *slog.Logger) error {
 	taskRepo := postgres.NewTaskRepository(pool)
 	userRepo := postgres.NewUserRepository(pool)
 
-	tokenService, err := token.NewService(cfg.JWTSecret, cfg.JWTTTL, cfg.JWTIssuer)
+	tokenService, err := token.NewService(cfg.JWTSecret, cfg.JWTTTL, cfg.JWTIssuer, cfg.JWTMinSecretLength)
 	if err != nil {
 		return fmt.Errorf("build token service: %w", err)
 	}
 
-	taskUC := usecase.NewTaskUseCase(taskRepo, dbCallTimeout, log)
-	userUC := usecase.NewUserUseCase(userRepo, dbCallTimeout, log)
-	authUC := usecase.NewAuthUseCase(userRepo, tokenService, cfg.AdminUsername, cfg.AdminPasswordHash, dbCallTimeout, log)
+	hasher, err := password.NewHasher(cfg.PasswordBcryptCost)
+	if err != nil {
+		return fmt.Errorf("build password hasher: %w", err)
+	}
+
+	taskUC := usecase.NewTaskUseCase(taskRepo, usecase.TaskConfig{
+		Timeout:              cfg.DBCallTimeout,
+		MaxTitleLength:       cfg.TaskMaxTitleLength,
+		MaxDescriptionLength: cfg.TaskMaxDescriptionLength,
+	}, log)
+
+	userUC := usecase.NewUserUseCase(userRepo, hasher, usecase.UserConfig{
+		Timeout:           cfg.DBCallTimeout,
+		MinUsernameLength: cfg.UsernameMinLength,
+		MaxUsernameLength: cfg.UsernameMaxLength,
+		MinPasswordLength: cfg.PasswordMinLength,
+		AdminUsername:     cfg.AdminUsername,
+	}, log)
+
+	authUC := usecase.NewAuthUseCase(userRepo, tokenService, hasher, usecase.AuthConfig{
+		AdminUsername:     cfg.AdminUsername,
+		AdminPasswordHash: cfg.AdminPasswordHash,
+		Timeout:           cfg.DBCallTimeout,
+		MinUsernameLength: cfg.UsernameMinLength,
+		MaxUsernameLength: cfg.UsernameMaxLength,
+		MinPasswordLength: cfg.PasswordMinLength,
+	}, log)
 
 	app := httpserver.New(
 		httpserver.Config{
-			CORSAllowOrigins: cfg.CORSAllowOrigins,
-			ReadTimeout:      cfg.ReadTimeout,
-			WriteTimeout:     cfg.WriteTimeout,
+			AppName:                  cfg.AppName,
+			ReadTimeout:              cfg.ReadTimeout,
+			WriteTimeout:             cfg.WriteTimeout,
+			CORSAllowOrigins:         cfg.CORSAllowOrigins,
+			CORSAllowMethods:         cfg.CORSAllowMethods,
+			CORSAllowHeaders:         cfg.CORSAllowHeaders,
+			RateLimitAuthMaxRequests: cfg.RateLimitAuthMaxRequests,
+			RateLimitAuthWindow:      cfg.RateLimitAuthWindow,
+			HealthReadyTimeout:       cfg.HealthReadyTimeout,
 		},
 		log,
 		authUC,
