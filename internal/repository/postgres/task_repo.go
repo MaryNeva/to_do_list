@@ -1,0 +1,151 @@
+package postgres
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"to-do-list/internal/apperr"
+	"to-do-list/internal/domain"
+)
+
+const taskColumns = "id, title, description, status, creator_id, created_at, updated_at"
+
+type taskModel struct {
+	ID          int64     `db:"id"`
+	Title       string    `db:"title"`
+	Description string    `db:"description"`
+	Status      string    `db:"status"`
+	CreatorID   int64     `db:"creator_id"`
+	CreatedAt   time.Time `db:"created_at"`
+	UpdatedAt   time.Time `db:"updated_at"`
+}
+
+func (m taskModel) toDomain() domain.Task {
+	return domain.Task{
+		ID:          m.ID,
+		Title:       m.Title,
+		Description: m.Description,
+		Status:      domain.TaskStatus(m.Status),
+		CreatorID:   m.CreatorID,
+		CreatedAt:   m.CreatedAt,
+		UpdatedAt:   m.UpdatedAt,
+	}
+}
+
+type TaskRepository struct {
+	pool *pgxpool.Pool
+}
+
+func NewTaskRepository(pool *pgxpool.Pool) *TaskRepository {
+	return &TaskRepository{pool: pool}
+}
+
+var _ domain.TaskRepository = (*TaskRepository)(nil)
+
+func (r *TaskRepository) Create(ctx context.Context, task domain.Task) (domain.Task, error) {
+	query := `INSERT INTO tasks (title, description, status, creator_id)
+	          VALUES ($1, $2, $3, $4)
+	          RETURNING ` + taskColumns
+
+	rows, err := r.pool.Query(ctx, query, task.Title, task.Description, string(task.Status), task.CreatorID)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("postgres: insert task: %w", err)
+	}
+	defer rows.Close()
+
+	model, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByName[taskModel])
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("postgres: scan created task: %w", err)
+	}
+
+	return model.toDomain(), nil
+}
+
+func (r *TaskRepository) GetByID(ctx context.Context, id int64) (domain.Task, error) {
+	query := `SELECT ` + taskColumns + ` FROM tasks WHERE id = $1`
+
+	rows, err := r.pool.Query(ctx, query, id)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("postgres: select task: %w", err)
+	}
+	defer rows.Close()
+
+	model, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByName[taskModel])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Task{}, apperr.ErrNotFound
+		}
+		return domain.Task{}, fmt.Errorf("postgres: scan task: %w", err)
+	}
+
+	return model.toDomain(), nil
+}
+
+func (r *TaskRepository) ListByCreator(ctx context.Context, creatorID int64) ([]domain.Task, error) {
+	query := `SELECT ` + taskColumns + ` FROM tasks WHERE creator_id = $1 ORDER BY created_at DESC`
+
+	rows, err := r.pool.Query(ctx, query, creatorID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: select tasks: %w", err)
+	}
+	defer rows.Close()
+
+	models, err := pgx.CollectRows(rows, pgx.RowToStructByName[taskModel])
+	if err != nil {
+		return nil, fmt.Errorf("postgres: scan tasks: %w", err)
+	}
+
+	result := make([]domain.Task, 0, len(models))
+	for _, m := range models {
+		result = append(result, m.toDomain())
+	}
+
+	return result, nil
+}
+
+func (r *TaskRepository) Update(ctx context.Context, task domain.Task) (domain.Task, error) {
+	query := `UPDATE tasks SET title = $1, description = $2 WHERE id = $3 RETURNING ` + taskColumns
+
+	rows, err := r.pool.Query(ctx, query, task.Title, task.Description, task.ID)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("postgres: update task: %w", err)
+	}
+	defer rows.Close()
+
+	model, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByName[taskModel])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Task{}, apperr.ErrNotFound
+		}
+		return domain.Task{}, fmt.Errorf("postgres: scan updated task: %w", err)
+	}
+
+	return model.toDomain(), nil
+}
+
+func (r *TaskRepository) Delete(ctx context.Context, id int64) error {
+	tag, err := r.pool.Exec(ctx, `DELETE FROM tasks WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("postgres: delete task: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return apperr.ErrNotFound
+	}
+	return nil
+}
+
+func (r *TaskRepository) UpdateStatus(ctx context.Context, id int64, status domain.TaskStatus) error {
+	tag, err := r.pool.Exec(ctx, `UPDATE tasks SET status = $2 WHERE id = $1`, id, string(status))
+	if err != nil {
+		return fmt.Errorf("postgres: update task status: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return apperr.ErrNotFound
+	}
+	return nil
+}

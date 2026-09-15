@@ -1,0 +1,39 @@
+@host = http://localhost:8080
+@api = {{host}}/api/v1
+@token = paste-a-valid-token-from-auth.http-here
+
+### Create a task
+POST {{api}}/tasks
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "title": "Buy milk",
+  "description": "2% please"
+}
+
+### List my tasks
+GET {{api}}/tasks
+Authorization: Bearer {{token}}
+
+### Get a single task
+GET {{api}}/tasks/1
+Authorization: Bearer {{token}}
+
+### Update a task
+PATCH {{api}}/tasks/1
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "title": "Buy oat milk",
+  "description": "the barista kind"
+}
+
+### Cycle status: created -> in_progress -> completed -> created
+POST {{api}}/tasks/1/toggle-status
+Authorization: Bearer {{token}}
+
+### Delete a task
+DELETE {{api}}/tasks/1
+Authorization: Bearer {{token}}
