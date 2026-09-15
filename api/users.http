@@ -1,0 +1,24 @@
+@host = http://localhost:8080
+@api = {{host}}/api/v1
+@token = paste-a-valid-token-from-auth.http-here
+
+### Get my own profile (any authenticated user can read their own profile)
+GET {{api}}/users/1
+Authorization: Bearer {{token}}
+
+### Update my own profile - omit "password" to leave it unchanged
+PATCH {{api}}/users/1
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "email": "alice@new-domain.example"
+}
+
+### List all users - admin only, returns 403 for a regular user
+GET {{api}}/users
+Authorization: Bearer {{token}}
+
+### Delete my own account
+DELETE {{api}}/users/1
+Authorization: Bearer {{token}}
