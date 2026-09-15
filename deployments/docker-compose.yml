@@ -1,0 +1,57 @@
+# Run from the project root:
+#   docker compose -f deployments/docker-compose.yml --env-file .env up --build
+#
+# --env-file is explicit because docker compose otherwise looks for .env
+# next to this file (deployments/.env), not in the project root where
+# .env.example tells you to create it.
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: todo_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      POSTGRES_DB: ${DB_NAME:-to_do}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - todo_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-to_do}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    container_name: todo_app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      SERVER_ADDRESS: ":8080"
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-to_do}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      DB_SSLMODE: disable
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      JWT_TTL: ${JWT_TTL:-1h}
+      JWT_ISSUER: to-do-list
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-*}
+      RUN_MIGRATIONS: "true"
+      LOG_LEVEL: info
+      LOG_FORMAT: json
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+
+volumes:
+  todo_pgdata:
