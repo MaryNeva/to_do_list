@@ -19,45 +19,62 @@ type TokenService interface {
 }
 
 type AuthUseCase struct {
-	users             domain.UserRepository
-	tokens            TokenService
-	adminUsername     string
-	adminPasswordHash string
-	timeout           time.Duration
-	logger            *slog.Logger
+	users  domain.UserRepository
+	tokens TokenService
+	hasher *password.Hasher
+	cfg    AuthConfig
+	logger *slog.Logger
+}
+
+type AuthConfig struct {
+	AdminUsername     string
+	AdminPasswordHash string
+	Timeout           time.Duration
+	MinUsernameLength int
+	MaxUsernameLength int
+	MinPasswordLength int
 }
 
 func NewAuthUseCase(
 	users domain.UserRepository,
 	tokens TokenService,
-	adminUsername, adminPasswordHash string,
-	timeout time.Duration,
+	hasher *password.Hasher,
+	cfg AuthConfig,
 	logger *slog.Logger,
 ) *AuthUseCase {
 	return &AuthUseCase{
-		users:             users,
-		tokens:            tokens,
-		adminUsername:     adminUsername,
-		adminPasswordHash: adminPasswordHash,
-		timeout:           timeout,
-		logger:            logger,
+		users:  users,
+		tokens: tokens,
+		hasher: hasher,
+		cfg:    cfg,
+		logger: logger,
 	}
 }
 
 var _ domain.AuthService = (*AuthUseCase)(nil)
 
 func (a *AuthUseCase) Register(ctx context.Context, username, email, plainPassword string) (domain.User, error) {
-	ctx, cancel := context.WithTimeout(ctx, a.timeout)
+	ctx, cancel := context.WithTimeout(ctx, a.cfg.Timeout)
 	defer cancel()
 
-	username = strings.TrimSpace(username)
+	username = normalizeUsername(username)
 	email = strings.TrimSpace(email)
 
 	if username == "" || email == "" || plainPassword == "" {
 		return domain.User{}, fmt.Errorf("%w: username, email and password are required", apperr.ErrValidation)
 	}
+	if err := validateUsername(username, a.cfg.MinUsernameLength, a.cfg.MaxUsernameLength); err != nil {
+		return domain.User{}, err
+	}
 
-	hash, err := password.Hash(plainPassword)
+	if isReservedUsername(a.cfg.AdminUsername, username) {
+		return domain.User{}, fmt.Errorf("%w: username %q is reserved", apperr.ErrConflict, username)
+	}
+	if err := validatePassword(plainPassword, a.cfg.MinPasswordLength); err != nil {
+		return domain.User{}, err
+	}
+
+	hash, err := a.hasher.Hash(plainPassword)
 	if err != nil {
 		return domain.User{}, fmt.Errorf("hash password: %w", err)
 	}
@@ -79,16 +96,16 @@ func (a *AuthUseCase) Register(ctx context.Context, username, email, plainPasswo
 }
 
 func (a *AuthUseCase) Login(ctx context.Context, username, plainPassword string) (string, time.Time, domain.User, error) {
-	ctx, cancel := context.WithTimeout(ctx, a.timeout)
+	ctx, cancel := context.WithTimeout(ctx, a.cfg.Timeout)
 	defer cancel()
 
-	username = strings.TrimSpace(username)
+	username = normalizeUsername(username)
 
-	if a.adminUsername != "" && username == a.adminUsername {
-		if err := password.Verify(a.adminPasswordHash, plainPassword); err != nil {
+	if isReservedUsername(a.cfg.AdminUsername, username) {
+		if err := password.Verify(a.cfg.AdminPasswordHash, plainPassword); err != nil {
 			return "", time.Time{}, domain.User{}, apperr.ErrInvalidCredentials
 		}
-		admin := domain.User{ID: 0, Username: a.adminUsername}
+		admin := domain.User{ID: 0, Username: normalizeUsername(a.cfg.AdminUsername)}
 		tokenString, expiresAt, err := a.tokens.Generate(admin.ID, admin.Username, true)
 		if err != nil {
 			return "", time.Time{}, domain.User{}, fmt.Errorf("generate token: %w", err)
@@ -99,8 +116,6 @@ func (a *AuthUseCase) Login(ctx context.Context, username, plainPassword string)
 	user, err := a.users.GetByUsername(ctx, username)
 	if err != nil {
 		if errors.Is(err, apperr.ErrNotFound) {
-			// Same error as a wrong password: do not reveal whether the
-			// username exists.
 			return "", time.Time{}, domain.User{}, apperr.ErrInvalidCredentials
 		}
 		return "", time.Time{}, domain.User{}, fmt.Errorf("get user: %w", err)

@@ -1,24 +1,10 @@
 -- Initial schema: users and tasks.
 --
--- Differences from the original hand-run init.sql:
---   * CREATE USER / CREATE DATABASE removed - that is infrastructure setup,
---     handled by Postgres's own POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB
---     environment variables in deployments/docker-compose.yml, not by a
---     migration (a migration runs *inside* a database that must already
---     exist, connected as a user that must already exist).
---   * users.username is now UNIQUE - login looks users up by username, so a
---     duplicate username would previously have made login for either
---     account resolve to whichever row Postgres happened to return first.
---   * password column renamed password_hash to make it unambiguous at the
---     schema level that this is never a plaintext password.
---   * created_at/updated_at are TIMESTAMPTZ, not TIMESTAMP, so stored
---     instants are unambiguous regardless of the server's or a client's
---     local timezone.
---   * status is a plain TEXT column with a CHECK constraint instead of a
---     Postgres ENUM type. Adding a new status to an ENUM requires
---     ALTER TYPE ... ADD VALUE, which cannot run inside a transaction in
---     older Postgres versions and complicates migrations; CHECK is just as
---     safe and trivially adjusted by a later migration.
+-- username/email are UNIQUE since login looks users up by username. status
+-- uses a CHECK constraint rather than a Postgres ENUM so adding a new value
+-- later is a plain migration instead of an ALTER TYPE. Database user/name
+-- creation is left to POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB in
+-- deployments/docker-compose.yml, not to a migration.
 
 CREATE TABLE IF NOT EXISTS users (
     id            BIGSERIAL PRIMARY KEY,
