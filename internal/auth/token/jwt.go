@@ -11,8 +11,6 @@ import (
 	"to-do-list/internal/domain"
 )
 
-const MinSecretLength = 32
-
 type claims struct {
 	UserID   int64  `json:"user_id"`
 	Username string `json:"username"`
@@ -26,9 +24,12 @@ type Service struct {
 	issuer string
 }
 
-func NewService(secret string, ttl time.Duration, issuer string) (*Service, error) {
-	if len(secret) < MinSecretLength {
-		return nil, fmt.Errorf("token: secret must be at least %d characters, got %d", MinSecretLength, len(secret))
+func NewService(secret string, ttl time.Duration, issuer string, minSecretLength int) (*Service, error) {
+	if minSecretLength <= 0 {
+		return nil, fmt.Errorf("token: minimum secret length must be positive, got %d", minSecretLength)
+	}
+	if len(secret) < minSecretLength {
+		return nil, fmt.Errorf("token: secret must be at least %d characters, got %d", minSecretLength, len(secret))
 	}
 	if ttl <= 0 {
 		return nil, fmt.Errorf("token: ttl must be positive, got %s", ttl)

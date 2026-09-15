@@ -11,11 +11,14 @@ import (
 	"to-do-list/internal/apperr"
 )
 
-const testSecret = "0123456789abcdef0123456789abcdef" // 33 chars, >= MinSecretLength
+const (
+	testSecret          = "0123456789abcdef0123456789abcdef" // 32 chars
+	testMinSecretLength = 32
+)
 
 func newTestService(t *testing.T, ttl time.Duration) *Service {
 	t.Helper()
-	svc, err := NewService(testSecret, ttl, "to-do-list-test")
+	svc, err := NewService(testSecret, ttl, "to-do-list-test", testMinSecretLength)
 	if err != nil {
 		t.Fatalf("NewService() unexpected error: %v", err)
 	}
@@ -23,16 +26,16 @@ func newTestService(t *testing.T, ttl time.Duration) *Service {
 }
 
 func TestNewService_RejectsWeakSecret(t *testing.T) {
-	if _, err := NewService("too-short", time.Hour, "issuer"); err == nil {
+	if _, err := NewService("too-short", time.Hour, "issuer", testMinSecretLength); err == nil {
 		t.Error("NewService() with a short secret should return an error")
 	}
 }
 
 func TestNewService_RejectsNonPositiveTTL(t *testing.T) {
-	if _, err := NewService(testSecret, 0, "issuer"); err == nil {
+	if _, err := NewService(testSecret, 0, "issuer", testMinSecretLength); err == nil {
 		t.Error("NewService() with a zero ttl should return an error")
 	}
-	if _, err := NewService(testSecret, -time.Second, "issuer"); err == nil {
+	if _, err := NewService(testSecret, -time.Second, "issuer", testMinSecretLength); err == nil {
 		t.Error("NewService() with a negative ttl should return an error")
 	}
 }
@@ -141,7 +144,7 @@ func TestParse_WrongSecret(t *testing.T) {
 		t.Fatalf("Generate() unexpected error: %v", err)
 	}
 
-	verifier, err := NewService(strings.Repeat("z", MinSecretLength), time.Hour, "issuer")
+	verifier, err := NewService(strings.Repeat("z", testMinSecretLength), time.Hour, "issuer", testMinSecretLength)
 	if err != nil {
 		t.Fatalf("NewService() unexpected error: %v", err)
 	}
@@ -151,9 +154,6 @@ func TestParse_WrongSecret(t *testing.T) {
 	}
 }
 
-// TestParse_RejectsAlgNone guards against the classic JWT "algorithm
-// confusion" attack, where a token is signed with alg "none" (no signature
-// at all) hoping a lenient verifier accepts it as trusted.
 func TestParse_RejectsAlgNone(t *testing.T) {
 	svc := newTestService(t, time.Hour)
 
