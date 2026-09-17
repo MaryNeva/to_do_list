@@ -66,6 +66,8 @@ func New(cfg Config, logger *slog.Logger, authSvc domain.AuthService, taskSvc do
 	authGroup := v1.Group("/auth")
 	authGroup.Post("/register", authLimiter, authHandler.Register)
 	authGroup.Post("/login", authLimiter, authHandler.Login)
+	authGroup.Post("/refresh", authLimiter, authHandler.Refresh)
+	authGroup.Post("/logout", authHandler.Logout)
 	authGroup.Get("/me", authMiddleware, authHandler.Me)
 
 	protected := v1.Group("", authMiddleware)

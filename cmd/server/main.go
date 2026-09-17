@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -58,6 +59,7 @@ func run(cfg config.Config, log *slog.Logger) error {
 
 	taskRepo := postgres.NewTaskRepository(pool)
 	userRepo := postgres.NewUserRepository(pool)
+	refreshRepo := postgres.NewRefreshTokenRepository(pool)
 
 	tokenService, err := token.NewService(cfg.JWTSecret, cfg.JWTTTL, cfg.JWTIssuer, cfg.JWTMinSecretLength)
 	if err != nil {
@@ -73,6 +75,8 @@ func run(cfg config.Config, log *slog.Logger) error {
 		Timeout:              cfg.DBCallTimeout,
 		MaxTitleLength:       cfg.TaskMaxTitleLength,
 		MaxDescriptionLength: cfg.TaskMaxDescriptionLength,
+		DefaultPageSize:      cfg.DefaultPageSize,
+		MaxPageSize:          cfg.MaxPageSize,
 	}, log)
 
 	userUC := usecase.NewUserUseCase(userRepo, hasher, usecase.UserConfig{
@@ -81,16 +85,40 @@ func run(cfg config.Config, log *slog.Logger) error {
 		MaxUsernameLength: cfg.UsernameMaxLength,
 		MinPasswordLength: cfg.PasswordMinLength,
 		AdminUsername:     cfg.AdminUsername,
+		DefaultPageSize:   cfg.DefaultPageSize,
+		MaxPageSize:       cfg.MaxPageSize,
 	}, log)
 
-	authUC := usecase.NewAuthUseCase(userRepo, tokenService, hasher, usecase.AuthConfig{
+	authUC := usecase.NewAuthUseCase(userRepo, tokenService, refreshRepo, token.NewIssuer(), hasher, usecase.AuthConfig{
 		AdminUsername:     cfg.AdminUsername,
 		AdminPasswordHash: cfg.AdminPasswordHash,
 		Timeout:           cfg.DBCallTimeout,
 		MinUsernameLength: cfg.UsernameMinLength,
 		MaxUsernameLength: cfg.UsernameMaxLength,
 		MinPasswordLength: cfg.PasswordMinLength,
+		RefreshTTL:        cfg.JWTRefreshTTL,
 	}, log)
+
+	cleaner := usecase.NewSessionCleaner(refreshRepo, usecase.SessionCleanupConfig{
+		Interval:  cfg.CleanupInterval,
+		Retention: cfg.RefreshTokenRetention,
+		Timeout:   cfg.DBCallTimeout,
+	}, log)
+
+	// The cleaner gets its own cancellable context so it is stopped on every
+	// return path, not only on a shutdown signal. The defers are registered
+	// in this order on purpose: they run last-in-first-out, so the goroutine
+	// is told to stop before anything waits for it.
+	cleanupCtx, stopCleanup := context.WithCancel(ctx)
+	var cleanupDone sync.WaitGroup
+	defer cleanupDone.Wait()
+	defer stopCleanup()
+
+	cleanupDone.Add(1)
+	go func() {
+		defer cleanupDone.Done()
+		cleaner.Run(cleanupCtx)
+	}()
 
 	app := httpserver.New(
 		httpserver.Config{

@@ -3,6 +3,7 @@ package token
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
@@ -16,6 +17,24 @@ type claims struct {
 	Username string `json:"username"`
 	IsAdmin  bool   `json:"is_admin,omitempty"`
 	jwt.RegisteredClaims
+}
+
+const signingAlgorithm = "HS256"
+
+// validateIdentity rejects claims that are correctly signed but describe no
+// usable account. ID 0 is reserved for the bootstrap admin, which has no row
+// in users, so any other token carrying it is malformed.
+func validateIdentity(c claims) error {
+	switch {
+	case c.UserID < 0:
+		return fmt.Errorf("%w: token carries a negative user id", apperr.ErrUnauthorized)
+	case c.UserID == 0 && !c.IsAdmin:
+		return fmt.Errorf("%w: user id 0 is reserved for the bootstrap admin", apperr.ErrUnauthorized)
+	case strings.TrimSpace(c.Username) == "":
+		return fmt.Errorf("%w: token carries no username", apperr.ErrUnauthorized)
+	default:
+		return nil
+	}
 }
 
 type Service struct {
@@ -54,7 +73,7 @@ func (s *Service) Generate(userID int64, username string, isAdmin bool) (tokenSt
 		},
 	}
 
-	raw, err := jwt.NewWithClaims(jwt.SigningMethodHS256, c).SignedString(s.secret)
+	raw, err := jwt.NewWithClaims(jwt.GetSigningMethod(signingAlgorithm), c).SignedString(s.secret)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("token: sign: %w", err)
 	}
@@ -68,8 +87,12 @@ func (s *Service) Parse(tokenString string) (domain.Claims, error) {
 	}
 
 	var c claims
-	parsed, err := jwt.ParseWithClaims(tokenString, &c, func(t *jwt.Token) (interface{}, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+	parser := jwt.NewParser(jwt.WithValidMethods([]string{signingAlgorithm}))
+	parsed, err := parser.ParseWithClaims(tokenString, &c, func(t *jwt.Token) (interface{}, error) {
+		// WithValidMethods already pins the algorithm; this repeats the
+		// check at the point the key is handed out, so a future change to
+		// the parser options cannot silently widen what gets verified.
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok || t.Method.Alg() != signingAlgorithm {
 			return nil, fmt.Errorf("unexpected signing method %q", t.Header["alg"])
 		}
 		return s.secret, nil
@@ -94,8 +117,18 @@ func (s *Service) Parse(tokenString string) (domain.Claims, error) {
 		return domain.Claims{}, fmt.Errorf("%w: invalid token", apperr.ErrUnauthorized)
 	}
 
-	if c.UserID < 0 {
-		return domain.Claims{}, fmt.Errorf("%w: invalid token subject", apperr.ErrUnauthorized)
+	// An access token without exp never stops being accepted, so a missing
+	// expiry is rejected rather than treated as "no deadline".
+	if c.ExpiresAt == nil {
+		return domain.Claims{}, fmt.Errorf("%w: token has no expiry", apperr.ErrUnauthorized)
+	}
+
+	if c.Issuer != s.issuer {
+		return domain.Claims{}, fmt.Errorf("%w: token was issued by %q, not %q", apperr.ErrUnauthorized, c.Issuer, s.issuer)
+	}
+
+	if err := validateIdentity(c); err != nil {
+		return domain.Claims{}, err
 	}
 
 	return domain.Claims{
