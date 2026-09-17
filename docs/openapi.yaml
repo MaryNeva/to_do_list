@@ -50,6 +50,52 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Exchange a refresh token for a new pair
+      description: |
+        Rotates the session: the presented refresh token is consumed and a
+        new one is issued together with a fresh access token. The exchange is
+        atomic, so if several requests present the same token only one is
+        served; the others are treated as a replay, which revokes every
+        session of that user - including the one just handed out.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '200':
+          description: New token pair
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke a refresh token
+      description: |
+        Ends the session the refresh token belongs to. Already unknown or
+        revoked tokens are accepted, since the requested state is reached
+        either way.
+
+        The access token issued earlier is NOT invalidated: it is stateless
+        and stays valid until its own exp, at most jwt.ttl after it was
+        issued. The same applies after a password change, which revokes every
+        refresh session of the account. Lower jwt.ttl if a deployment needs
+        access cut off sooner.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LogoutRequest' }
+      responses:
+        '204': { description: Session revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /auth/me:
     get:
       tags: [auth]
@@ -85,6 +131,13 @@ paths:
       tags: [tasks]
       summary: List the caller's own tasks
       security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: limit, in: query, description: "Page size; values above the maximum are trimmed to it",
+            schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+        - { name: status, in: query, schema: { type: string, enum: [created, in_progress, completed] } }
+        - { name: sort, in: query, schema: { type: string, enum: [created_at, updated_at, title, status], default: created_at } }
+        - { name: order, in: query, schema: { type: string, enum: [asc, desc], default: desc } }
       responses:
         '200':
           description: OK
@@ -155,6 +208,9 @@ paths:
 
   /users:
     get:
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
       tags: [users]
       summary: List every user (admin only)
       security: [{ bearerAuth: [] }]
@@ -285,12 +341,39 @@ components:
         username: { type: string }
         password: { type: string }
 
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string }
+
+    LogoutRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string }
+
     LoginResponse:
       type: object
       properties:
         token: { type: string }
         token_type: { type: string, example: Bearer }
         expires_at: { type: string, format: date-time }
+        # Absent for the bootstrap admin, which has no row in users and so
+        # cannot own a session; it re-authenticates with its password.
+        refresh_token: { type: string }
+        refresh_expires_at: { type: string, format: date-time }
+
+    Page:
+      type: object
+      description: |
+        Envelope shared by the list endpoints. total counts everything the
+        filter matches, not just the current page.
+      properties:
+        items: { type: array, items: {} }
+        total: { type: integer, example: 137 }
+        limit: { type: integer, example: 20 }
+        offset: { type: integer, example: 0 }
 
     Me:
       type: object

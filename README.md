@@ -12,6 +12,26 @@ the security and correctness choices behind the auth and ownership checks.
 
 - JWT authentication (HS256) with algorithm-confusion protection, expiry,
   and a minimum-length signing secret enforced at startup.
+- Refresh tokens with rotation and revocation: `POST /auth/refresh` swaps a
+  session for a new pair, `POST /auth/logout` ends it, and presenting a token
+  that was already consumed revokes every session that user has. Only a
+  SHA-256 hash of each token is stored, so a database dump cannot be replayed.
+  The exchange is a single transaction taken under a row lock on the owning
+  user, so a token can be spent at most once even if several requests present
+  it at the same moment, and a failed rotation leaves the old token usable.
+- Changing a password ends every refresh session of that account in the same
+  transaction as the password write, so a session opened with the old
+  password cannot outlive it - see "Session lifetime" below for what that
+  does and does not invalidate.
+- Expired refresh tokens are swept by a background janitor that stops with
+  the server; rows are kept for a retention period after they lapse so a
+  replayed token is still recognisable as reuse rather than as unknown.
+- Paginated list endpoints (`limit`/`offset` with a configured default and
+  ceiling) returning `{items, total, limit, offset}`; tasks can additionally
+  be filtered by `status` and sorted by `created_at`, `updated_at`, `title`
+  or `status` in either direction.
+- Usernames are unique and matched case-insensitively (a unique index on
+  `lower(username)`), so "Alice" and "alice" cannot be two accounts.
 - Tasks are always scoped to their creator; the ownership check lives in one
   place (the use-case layer) and is exercised by tests.
 - An optional bootstrap admin login (via env vars, not a database row) that
@@ -199,6 +219,7 @@ column.
 | `db.connect_timeout` | `5s` | `DB_CONNECT_TIMEOUT` |
 | `db.call_timeout` | `5s` | `DB_CALL_TIMEOUT` |
 | `jwt.ttl` | `1h` | `JWT_TTL` |
+| `jwt.refresh_ttl` | `720h` | `JWT_REFRESH_TTL` |
 | `jwt.issuer` | `to-do-list` | `JWT_ISSUER` |
 | `jwt.min_secret_length` | `32` | `JWT_MIN_SECRET_LENGTH` |
 | `password.bcrypt_cost` | `12` | `PASSWORD_BCRYPT_COST` |
@@ -206,6 +227,10 @@ column.
 | `user.min_username_length` / `user.max_username_length` | `3` / `50` | `USER_MIN_USERNAME_LENGTH` / `USER_MAX_USERNAME_LENGTH` |
 | `task.max_title_length` | `200` | `TASK_MAX_TITLE_LENGTH` |
 | `task.max_description_length` | `4000` | `TASK_MAX_DESCRIPTION_LENGTH` |
+| `pagination.default_page_size` | `20` | `PAGINATION_DEFAULT_PAGE_SIZE` |
+| `pagination.max_page_size` | `100` | `PAGINATION_MAX_PAGE_SIZE` |
+| `cleanup.interval` | `1h` | `CLEANUP_INTERVAL` |
+| `cleanup.refresh_token_retention` | `720h` | `CLEANUP_REFRESH_TOKEN_RETENTION` |
 | `ratelimit.auth_max_requests` / `ratelimit.auth_window` | `20` / `1m` | `RATELIMIT_AUTH_MAX_REQUESTS` / `RATELIMIT_AUTH_WINDOW` |
 | `cors.allow_origins` / `allow_methods` / `allow_headers` | `*` / methods / headers | `CORS_ALLOW_ORIGINS` / `CORS_ALLOW_METHODS` / `CORS_ALLOW_HEADERS` |
 | `health.ready_timeout` | `2s` | `HEALTH_READY_TIMEOUT` |
@@ -228,6 +253,29 @@ Policy that *is* configurable but cannot live in a struct tag - username and
 password lengths, task title/description limits - is enforced in the
 use-case layer instead, because `validate:"max=200"` tags are compile-time
 constants and cannot read `config.yaml`.
+
+### Session lifetime
+
+Two different things expire at two different speeds, and it is worth being
+explicit about which is which:
+
+| | Lives until | Ended by logout or a password change? |
+|---|---|---|
+| Access token (JWT) | `jwt.ttl` after it was issued (default 1h) | **No** - it is stateless and is not checked against the database on each request |
+| Refresh token | `jwt.refresh_ttl` (default 30d), or its first use | Yes, immediately |
+
+So `POST /auth/logout` and a password change both take effect on the next
+refresh, not on the next API call: an access token already in a client's
+hands keeps working until it expires. That is the price of not querying the
+database on every request, and the reason `jwt.ttl` is kept short. A
+deployment that needs instant invalidation should lower `jwt.ttl` rather
+than assume logout cuts access off at once.
+
+The access token is also verified strictly: only HS256 is accepted, the
+issuer must match `jwt.issuer`, an `exp` claim is required (a token without
+one is rejected rather than treated as eternal), and the identity has to make
+sense - a regular account needs a positive user id, and id 0 is reserved for
+the bootstrap admin.
 
 ### Superadmin / bootstrap admin login
 

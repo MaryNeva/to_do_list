@@ -88,6 +88,8 @@ func TestConcurrent_ProfileUpdatesThroughUseCase(t *testing.T) {
 		MinUsernameLength: 3,
 		MaxUsernameLength: 50,
 		MinPasswordLength: 8,
+		DefaultPageSize:   20,
+		MaxPageSize:       100,
 	}, testLogger())
 
 	oldHash, _ := hasher.Hash("original-password")
@@ -135,6 +137,8 @@ func newTaskUseCaseForIntegration(repo domain.TaskRepository) *usecase.TaskUseCa
 		Timeout:              5 * time.Second,
 		MaxTitleLength:       200,
 		MaxDescriptionLength: 4000,
+		DefaultPageSize:      20,
+		MaxPageSize:          100,
 	}, testLogger())
 }
 

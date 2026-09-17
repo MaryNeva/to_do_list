@@ -6,34 +6,42 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
+	"github.com/golang-migrate/migrate/v4"
+	_ "github.com/golang-migrate/migrate/v4/database/postgres"
+	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"to-do-list/internal/apperr"
 	"to-do-list/internal/domain"
 )
 
-const testSchema = `
-CREATE TABLE IF NOT EXISTS users (
-	id BIGSERIAL PRIMARY KEY,
-	username TEXT NOT NULL UNIQUE,
-	email TEXT NOT NULL UNIQUE,
-	password_hash TEXT NOT NULL,
-	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-	updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE TABLE IF NOT EXISTS tasks (
-	id BIGSERIAL PRIMARY KEY,
-	title TEXT NOT NULL,
-	description TEXT NOT NULL DEFAULT '',
-	status TEXT NOT NULL DEFAULT 'created',
-	creator_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-	updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-`
+// applyMigrations runs the real migration files instead of a copy of the
+// schema kept in this test: a copy silently drifts from migrations/ and the
+// tests then pass against a database the service would never have.
+func applyMigrations(t *testing.T, dsn string) {
+	t.Helper()
+
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate the migrations directory")
+	}
+	path := filepath.Join(filepath.Dir(thisFile), "..", "..", "..", "migrations")
+
+	m, err := migrate.New("file://"+path, dsn)
+	if err != nil {
+		t.Fatalf("initialise migrator: %v", err)
+	}
+	defer m.Close()
+
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("apply migrations: %v", err)
+	}
+}
 
 func setupTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -43,6 +51,8 @@ func setupTestPool(t *testing.T) *pgxpool.Pool {
 		t.Skip("TEST_DATABASE_URL not set; skipping Postgres integration test")
 	}
 
+	applyMigrations(t, dsn)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -51,10 +61,7 @@ func setupTestPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("connect to test database: %v", err)
 	}
 
-	if _, err := pool.Exec(ctx, testSchema); err != nil {
-		t.Fatalf("create test schema: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `TRUNCATE tasks, users RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE refresh_tokens, tasks, users RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("truncate test tables: %v", err)
 	}
 
@@ -111,22 +118,22 @@ func TestTaskRepository_ListByCreator(t *testing.T) {
 	repo := NewTaskRepository(pool)
 
 	ctx := context.Background()
-	if _, err := repo.Create(ctx, domain.Task{Title: "alice-1", CreatorID: alice.ID}); err != nil {
+	if _, err := repo.Create(ctx, domain.Task{Title: "alice-1", CreatorID: alice.ID, Status: domain.StatusCreated}); err != nil {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
-	if _, err := repo.Create(ctx, domain.Task{Title: "alice-2", CreatorID: alice.ID}); err != nil {
+	if _, err := repo.Create(ctx, domain.Task{Title: "alice-2", CreatorID: alice.ID, Status: domain.StatusCreated}); err != nil {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
-	if _, err := repo.Create(ctx, domain.Task{Title: "bob-1", CreatorID: bob.ID}); err != nil {
+	if _, err := repo.Create(ctx, domain.Task{Title: "bob-1", CreatorID: bob.ID, Status: domain.StatusCreated}); err != nil {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
-	tasks, err := repo.ListByCreator(ctx, alice.ID)
+	page, err := repo.ListByCreator(ctx, alice.ID, domain.TaskFilter{Page: domain.PageRequest{Limit: 10}})
 	if err != nil {
 		t.Fatalf("ListByCreator() unexpected error: %v", err)
 	}
-	if len(tasks) != 2 {
-		t.Fatalf("ListByCreator() returned %d tasks, want 2", len(tasks))
+	if len(page.Items) != 2 {
+		t.Fatalf("ListByCreator() returned %d tasks, want 2", len(page.Items))
 	}
 }
 
@@ -218,11 +225,11 @@ func TestUserRepository_List_EmptyIsNotAnError(t *testing.T) {
 	pool := setupTestPool(t)
 	repo := NewUserRepository(pool)
 
-	users, err := repo.List(context.Background())
+	users, err := repo.List(context.Background(), domain.PageRequest{Limit: 10})
 	if err != nil {
 		t.Fatalf("List() on an empty table unexpected error: %v", err)
 	}
-	if len(users) != 0 {
-		t.Fatalf("List() = %d users, want 0", len(users))
+	if len(users.Items) != 0 {
+		t.Fatalf("List() = %d users, want 0", len(users.Items))
 	}
 }
