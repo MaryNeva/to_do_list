@@ -30,6 +30,7 @@ db:
 
 jwt:
   ttl: 1h
+  refresh_ttl: 720h
   issuer: to-do-list
   min_secret_length: 32
 
@@ -44,6 +45,14 @@ user:
 task:
   max_title_length: 200
   max_description_length: 4000
+
+pagination:
+  default_page_size: 20
+  max_page_size: 100
+
+cleanup:
+  interval: 1h
+  refresh_token_retention: 720h
 
 ratelimit:
   auth_max_requests: 20
@@ -113,6 +122,7 @@ func TestLoadFrom_ReadsEverySettingFromYAML(t *testing.T) {
 		{"DBConnectTimeout", cfg.DBConnectTimeout.String(), "5s"},
 		{"DBCallTimeout", cfg.DBCallTimeout.String(), "5s"},
 		{"JWTTTL", cfg.JWTTTL.String(), "1h0m0s"},
+		{"JWTRefreshTTL", cfg.JWTRefreshTTL.String(), "720h0m0s"},
 		{"JWTIssuer", cfg.JWTIssuer, "to-do-list"},
 		{"JWTMinSecretLength", cfg.JWTMinSecretLength, 32},
 		{"PasswordBcryptCost", cfg.PasswordBcryptCost, 12},
@@ -121,6 +131,10 @@ func TestLoadFrom_ReadsEverySettingFromYAML(t *testing.T) {
 		{"UsernameMaxLength", cfg.UsernameMaxLength, 50},
 		{"TaskMaxTitleLength", cfg.TaskMaxTitleLength, 200},
 		{"TaskMaxDescriptionLength", cfg.TaskMaxDescriptionLength, 4000},
+		{"DefaultPageSize", cfg.DefaultPageSize, 20},
+		{"MaxPageSize", cfg.MaxPageSize, 100},
+		{"CleanupInterval", cfg.CleanupInterval.String(), "1h0m0s"},
+		{"RefreshTokenRetention", cfg.RefreshTokenRetention.String(), "720h0m0s"},
 		{"RateLimitAuthMaxRequests", cfg.RateLimitAuthMaxRequests, 20},
 		{"RateLimitAuthWindow", cfg.RateLimitAuthWindow.String(), "1m0s"},
 		{"CORSAllowOrigins", cfg.CORSAllowOrigins, "*"},
@@ -603,5 +617,35 @@ func TestLoadFrom_OptionalSecretsComeFromDotEnv(t *testing.T) {
 	}
 	if cfg.AdminPasswordHash == "" {
 		t.Error("AdminPasswordHash should have been read from .env")
+	}
+}
+
+func TestLoadFrom_RejectsPageSizeAboveMaximum(t *testing.T) {
+	setSecrets(t)
+
+	yaml := strings.Replace(completeYAML, "  default_page_size: 20", "  default_page_size: 500", 1)
+	configPath, envPath := writeConfig(t, yaml)
+
+	_, err := LoadFrom(configPath, envPath)
+	if err == nil {
+		t.Fatal("a default page size above the maximum should be rejected")
+	}
+	if !strings.Contains(err.Error(), "pagination.default_page_size") {
+		t.Errorf("error should name the key, got: %v", err)
+	}
+}
+
+func TestLoadFrom_RejectsRefreshTTLShorterThanAccessTTL(t *testing.T) {
+	setSecrets(t)
+
+	yaml := strings.Replace(completeYAML, "  refresh_ttl: 720h", "  refresh_ttl: 30m", 1)
+	configPath, envPath := writeConfig(t, yaml)
+
+	_, err := LoadFrom(configPath, envPath)
+	if err == nil {
+		t.Fatal("a refresh TTL shorter than the access TTL should be rejected")
+	}
+	if !strings.Contains(err.Error(), "jwt.refresh_ttl") {
+		t.Errorf("error should name the key, got: %v", err)
 	}
 }

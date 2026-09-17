@@ -32,6 +32,7 @@ type Config struct {
 
 	JWTSecret          string
 	JWTTTL             time.Duration
+	JWTRefreshTTL      time.Duration
 	JWTIssuer          string
 	JWTMinSecretLength int
 
@@ -43,6 +44,12 @@ type Config struct {
 
 	TaskMaxTitleLength       int
 	TaskMaxDescriptionLength int
+
+	DefaultPageSize int
+	MaxPageSize     int
+
+	CleanupInterval       time.Duration
+	RefreshTokenRetention time.Duration
 
 	RateLimitAuthMaxRequests int
 	RateLimitAuthWindow      time.Duration
@@ -110,6 +117,7 @@ func LoadFrom(configPath, envPath string) (Config, error) {
 
 		JWTSecret:          r.secret("JWT_SECRET"),
 		JWTTTL:             r.duration("JWT_TTL", "jwt.ttl"),
+		JWTRefreshTTL:      r.duration("JWT_REFRESH_TTL", "jwt.refresh_ttl"),
 		JWTIssuer:          r.str("JWT_ISSUER", "jwt.issuer"),
 		JWTMinSecretLength: r.integer("JWT_MIN_SECRET_LENGTH", "jwt.min_secret_length"),
 
@@ -121,6 +129,12 @@ func LoadFrom(configPath, envPath string) (Config, error) {
 
 		TaskMaxTitleLength:       r.integer("TASK_MAX_TITLE_LENGTH", "task.max_title_length"),
 		TaskMaxDescriptionLength: r.integer("TASK_MAX_DESCRIPTION_LENGTH", "task.max_description_length"),
+
+		DefaultPageSize: r.integer("PAGINATION_DEFAULT_PAGE_SIZE", "pagination.default_page_size"),
+		MaxPageSize:     r.integer("PAGINATION_MAX_PAGE_SIZE", "pagination.max_page_size"),
+
+		CleanupInterval:       r.duration("CLEANUP_INTERVAL", "cleanup.interval"),
+		RefreshTokenRetention: r.duration("CLEANUP_REFRESH_TOKEN_RETENTION", "cleanup.refresh_token_retention"),
 
 		RateLimitAuthMaxRequests: r.integer("RATELIMIT_AUTH_MAX_REQUESTS", "ratelimit.auth_max_requests"),
 		RateLimitAuthWindow:      r.duration("RATELIMIT_AUTH_WINDOW", "ratelimit.auth_window"),
@@ -390,8 +404,11 @@ func (c Config) validate() error {
 	validatePositiveDuration("db.connect_timeout", c.DBConnectTimeout)
 	validatePositiveDuration("db.call_timeout", c.DBCallTimeout)
 	validatePositiveDuration("jwt.ttl", c.JWTTTL)
+	validatePositiveDuration("jwt.refresh_ttl", c.JWTRefreshTTL)
 	validatePositiveDuration("ratelimit.auth_window", c.RateLimitAuthWindow)
 	validatePositiveDuration("health.ready_timeout", c.HealthReadyTimeout)
+	validatePositiveDuration("cleanup.interval", c.CleanupInterval)
+	validatePositiveDuration("cleanup.refresh_token_retention", c.RefreshTokenRetention)
 
 	validatePositiveInt("jwt.min_secret_length", c.JWTMinSecretLength)
 	validatePositiveInt("password.bcrypt_cost", c.PasswordBcryptCost)
@@ -401,6 +418,8 @@ func (c Config) validate() error {
 	validatePositiveInt("task.max_title_length", c.TaskMaxTitleLength)
 	validatePositiveInt("task.max_description_length", c.TaskMaxDescriptionLength)
 	validatePositiveInt("ratelimit.auth_max_requests", c.RateLimitAuthMaxRequests)
+	validatePositiveInt("pagination.default_page_size", c.DefaultPageSize)
+	validatePositiveInt("pagination.max_page_size", c.MaxPageSize)
 
 	if len(c.JWTSecret) < c.JWTMinSecretLength {
 		problems = append(
@@ -429,6 +448,28 @@ func (c Config) validate() error {
 					"no password could satisfy it",
 				c.PasswordMinLength,
 				maxBcryptPasswordLength,
+			),
+		)
+	}
+
+	if c.DefaultPageSize > c.MaxPageSize {
+		problems = append(
+			problems,
+			fmt.Sprintf(
+				"pagination.default_page_size (%d) is above pagination.max_page_size (%d)",
+				c.DefaultPageSize,
+				c.MaxPageSize,
+			),
+		)
+	}
+
+	if c.JWTRefreshTTL <= c.JWTTTL {
+		problems = append(
+			problems,
+			fmt.Sprintf(
+				"jwt.refresh_ttl (%s) must be longer than jwt.ttl (%s)",
+				c.JWTRefreshTTL,
+				c.JWTTTL,
 			),
 		)
 	}
