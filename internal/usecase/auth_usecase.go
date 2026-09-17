@@ -18,12 +18,19 @@ type TokenService interface {
 	Parse(tokenString string) (domain.Claims, error)
 }
 
+type RefreshTokenIssuer interface {
+	NewRefreshToken() (plain, hash string, err error)
+	HashRefreshToken(plain string) string
+}
+
 type AuthUseCase struct {
-	users  domain.UserRepository
-	tokens TokenService
-	hasher *password.Hasher
-	cfg    AuthConfig
-	logger *slog.Logger
+	users   domain.UserRepository
+	tokens  TokenService
+	refresh domain.RefreshTokenRepository
+	issuer  RefreshTokenIssuer
+	hasher  *password.Hasher
+	cfg     AuthConfig
+	logger  *slog.Logger
 }
 
 type AuthConfig struct {
@@ -33,21 +40,26 @@ type AuthConfig struct {
 	MinUsernameLength int
 	MaxUsernameLength int
 	MinPasswordLength int
+	RefreshTTL        time.Duration
 }
 
 func NewAuthUseCase(
 	users domain.UserRepository,
 	tokens TokenService,
+	refresh domain.RefreshTokenRepository,
+	issuer RefreshTokenIssuer,
 	hasher *password.Hasher,
 	cfg AuthConfig,
 	logger *slog.Logger,
 ) *AuthUseCase {
 	return &AuthUseCase{
-		users:  users,
-		tokens: tokens,
-		hasher: hasher,
-		cfg:    cfg,
-		logger: logger,
+		users:   users,
+		tokens:  tokens,
+		refresh: refresh,
+		issuer:  issuer,
+		hasher:  hasher,
+		cfg:     cfg,
+		logger:  logger,
 	}
 }
 
@@ -95,7 +107,7 @@ func (a *AuthUseCase) Register(ctx context.Context, username, email, plainPasswo
 	return created, nil
 }
 
-func (a *AuthUseCase) Login(ctx context.Context, username, plainPassword string) (string, time.Time, domain.User, error) {
+func (a *AuthUseCase) Login(ctx context.Context, username, plainPassword string) (domain.Tokens, domain.User, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.cfg.Timeout)
 	defer cancel()
 
@@ -103,34 +115,140 @@ func (a *AuthUseCase) Login(ctx context.Context, username, plainPassword string)
 
 	if isReservedUsername(a.cfg.AdminUsername, username) {
 		if err := password.Verify(a.cfg.AdminPasswordHash, plainPassword); err != nil {
-			return "", time.Time{}, domain.User{}, apperr.ErrInvalidCredentials
+			return domain.Tokens{}, domain.User{}, apperr.ErrInvalidCredentials
 		}
 		admin := domain.User{ID: 0, Username: normalizeUsername(a.cfg.AdminUsername)}
-		tokenString, expiresAt, err := a.tokens.Generate(admin.ID, admin.Username, true)
+		access, expiresAt, err := a.tokens.Generate(admin.ID, admin.Username, true)
 		if err != nil {
-			return "", time.Time{}, domain.User{}, fmt.Errorf("generate token: %w", err)
+			return domain.Tokens{}, domain.User{}, fmt.Errorf("generate token: %w", err)
 		}
-		return tokenString, expiresAt, admin, nil
+		// The bootstrap admin has no row in users, so it cannot own a
+		// refresh token; it re-authenticates with its configured password.
+		return domain.Tokens{AccessToken: access, AccessExpiresAt: expiresAt}, admin, nil
 	}
 
 	user, err := a.users.GetByUsername(ctx, username)
 	if err != nil {
 		if errors.Is(err, apperr.ErrNotFound) {
-			return "", time.Time{}, domain.User{}, apperr.ErrInvalidCredentials
+			return domain.Tokens{}, domain.User{}, apperr.ErrInvalidCredentials
 		}
-		return "", time.Time{}, domain.User{}, fmt.Errorf("get user: %w", err)
+		return domain.Tokens{}, domain.User{}, fmt.Errorf("get user: %w", err)
 	}
 
 	if !password.Matches(user.PasswordHash, plainPassword) {
-		return "", time.Time{}, domain.User{}, apperr.ErrInvalidCredentials
+		return domain.Tokens{}, domain.User{}, apperr.ErrInvalidCredentials
 	}
 
-	tokenString, expiresAt, err := a.tokens.Generate(user.ID, user.Username, false)
+	tokens, err := a.issueTokens(ctx, user)
 	if err != nil {
-		return "", time.Time{}, domain.User{}, fmt.Errorf("generate token: %w", err)
+		return domain.Tokens{}, domain.User{}, err
 	}
 
-	return tokenString, expiresAt, user, nil
+	return tokens, user, nil
+}
+
+func (a *AuthUseCase) Refresh(ctx context.Context, refreshToken string) (domain.Tokens, error) {
+	ctx, cancel := context.WithTimeout(ctx, a.cfg.Timeout)
+	defer cancel()
+
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return domain.Tokens{}, fmt.Errorf("%w: refresh token is required", apperr.ErrUnauthorized)
+	}
+
+	plain, hash, err := a.issuer.NewRefreshToken()
+	if err != nil {
+		return domain.Tokens{}, fmt.Errorf("generate refresh token: %w", err)
+	}
+
+	now := time.Now()
+	expiresAt := now.Add(a.cfg.RefreshTTL)
+
+	result, err := a.refresh.Rotate(ctx, a.issuer.HashRefreshToken(refreshToken), domain.RefreshToken{
+		TokenHash: hash,
+		ExpiresAt: expiresAt,
+	}, now)
+	switch {
+	case err == nil:
+	case errors.Is(err, apperr.ErrConflict):
+		if revokeErr := a.refresh.RevokeAllForUser(ctx, result.UserID); revokeErr != nil {
+			a.logger.ErrorContext(ctx, "revoking sessions after refresh token reuse failed", "error", revokeErr, "user_id", result.UserID)
+		}
+		a.logger.WarnContext(ctx, "refresh token reused after it was consumed", "user_id", result.UserID)
+		return domain.Tokens{}, fmt.Errorf("%w: refresh token is no longer valid", apperr.ErrUnauthorized)
+	case errors.Is(err, apperr.ErrNotFound):
+		return domain.Tokens{}, fmt.Errorf("%w: unknown refresh token", apperr.ErrUnauthorized)
+	case errors.Is(err, apperr.ErrUnauthorized):
+		return domain.Tokens{}, err
+	default:
+		return domain.Tokens{}, fmt.Errorf("rotate refresh token: %w", err)
+	}
+
+	user, err := a.users.GetByID(ctx, result.UserID)
+	if err != nil {
+		if errors.Is(err, apperr.ErrNotFound) {
+			return domain.Tokens{}, fmt.Errorf("%w: account no longer exists", apperr.ErrUnauthorized)
+		}
+		return domain.Tokens{}, fmt.Errorf("get user: %w", err)
+	}
+
+	access, accessExpiresAt, err := a.tokens.Generate(user.ID, user.Username, false)
+	if err != nil {
+		return domain.Tokens{}, fmt.Errorf("generate token: %w", err)
+	}
+
+	return domain.Tokens{
+		AccessToken:      access,
+		AccessExpiresAt:  accessExpiresAt,
+		RefreshToken:     plain,
+		RefreshExpiresAt: expiresAt,
+	}, nil
+}
+
+func (a *AuthUseCase) Logout(ctx context.Context, refreshToken string) error {
+	ctx, cancel := context.WithTimeout(ctx, a.cfg.Timeout)
+	defer cancel()
+
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return fmt.Errorf("%w: refresh token is required", apperr.ErrUnauthorized)
+	}
+
+	err := a.refresh.Revoke(ctx, a.issuer.HashRefreshToken(refreshToken))
+	switch {
+	case err == nil, errors.Is(err, apperr.ErrNotFound):
+		return nil
+	default:
+		return fmt.Errorf("revoke refresh token: %w", err)
+	}
+}
+
+func (a *AuthUseCase) issueTokens(ctx context.Context, user domain.User) (domain.Tokens, error) {
+	access, accessExpiresAt, err := a.tokens.Generate(user.ID, user.Username, false)
+	if err != nil {
+		return domain.Tokens{}, fmt.Errorf("generate token: %w", err)
+	}
+
+	plain, hash, err := a.issuer.NewRefreshToken()
+	if err != nil {
+		return domain.Tokens{}, fmt.Errorf("generate refresh token: %w", err)
+	}
+
+	refreshExpiresAt := time.Now().Add(a.cfg.RefreshTTL)
+	if _, err := a.refresh.Create(ctx, domain.RefreshToken{
+		UserID:    user.ID,
+		TokenHash: hash,
+		ExpiresAt: refreshExpiresAt,
+	}); err != nil {
+		return domain.Tokens{}, fmt.Errorf("store refresh token: %w", err)
+	}
+
+	return domain.Tokens{
+		AccessToken:      access,
+		AccessExpiresAt:  accessExpiresAt,
+		RefreshToken:     plain,
+		RefreshExpiresAt: refreshExpiresAt,
+	}, nil
 }
 
 func (a *AuthUseCase) ValidateToken(_ context.Context, tokenString string) (domain.Claims, error) {

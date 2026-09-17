@@ -21,6 +21,24 @@ Content-Type: application/json
   "password": "s3cret-password"
 }
 
+### Exchange the refresh token for a new pair (rotates the session)
+@refresh-token = paste-refresh-token-here
+
+POST {{api}}/auth/refresh
+Content-Type: application/json
+
+{
+  "refresh_token": "{{refresh-token}}"
+}
+
+### Log out - revokes the refresh token; the access token lives out its TTL
+POST {{api}}/auth/logout
+Content-Type: application/json
+
+{
+  "refresh_token": "{{refresh-token}}"
+}
+
 ### Who am I? (requires a token from /auth/login)
 @token = paste-token-here
 

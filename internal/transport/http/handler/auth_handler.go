@@ -45,16 +45,45 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 		return err
 	}
 
-	tokenString, expiresAt, _, err := h.auth.Login(c.Context(), req.Username, req.Password)
+	tokens, _, err := h.auth.Login(c.Context(), req.Username, req.Password)
 	if err != nil {
 		return err
 	}
 
-	return httptransport.JSON(c, fiber.StatusOK, dto.LoginResponse{
-		Token:     tokenString,
-		TokenType: "Bearer",
-		ExpiresAt: expiresAt,
-	})
+	return httptransport.JSON(c, fiber.StatusOK, dto.ToLoginResponse(tokens))
+}
+
+func (h *AuthHandler) Refresh(c *fiber.Ctx) error {
+	var req dto.RefreshRequest
+	if err := c.BodyParser(&req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return err
+	}
+
+	tokens, err := h.auth.Refresh(c.Context(), req.RefreshToken)
+	if err != nil {
+		return err
+	}
+
+	return httptransport.JSON(c, fiber.StatusOK, dto.ToLoginResponse(tokens))
+}
+
+func (h *AuthHandler) Logout(c *fiber.Ctx) error {
+	var req dto.LogoutRequest
+	if err := c.BodyParser(&req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return err
+	}
+
+	if err := h.auth.Logout(c.Context(), req.RefreshToken); err != nil {
+		return err
+	}
+
+	return c.SendStatus(fiber.StatusNoContent)
 }
 
 func (h *AuthHandler) Me(c *fiber.Ctx) error {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -33,8 +34,15 @@ func (f *fakeTokenService) Parse(tokenString string) (domain.Claims, error) {
 
 func newAuthUseCaseForTest(t *testing.T, adminUsername, adminPasswordHash string) (*AuthUseCase, *fakeUserRepo, *fakeTokenService) {
 	t.Helper()
+	uc, repo, tokens, _ := newAuthUseCaseWithRefresh(t, adminUsername, adminPasswordHash)
+	return uc, repo, tokens
+}
+
+func newAuthUseCaseWithRefresh(t *testing.T, adminUsername, adminPasswordHash string) (*AuthUseCase, *fakeUserRepo, *fakeTokenService, *fakeRefreshRepo) {
+	t.Helper()
 	repo := newFakeUserRepo()
 	tokens := &fakeTokenService{}
+	refresh := newFakeRefreshRepo()
 	cfg := AuthConfig{
 		AdminUsername:     adminUsername,
 		AdminPasswordHash: adminPasswordHash,
@@ -42,9 +50,10 @@ func newAuthUseCaseForTest(t *testing.T, adminUsername, adminPasswordHash string
 		MinUsernameLength: 3,
 		MaxUsernameLength: 50,
 		MinPasswordLength: 8,
+		RefreshTTL:        720 * time.Hour,
 	}
-	uc := NewAuthUseCase(repo, tokens, testHasher(t), cfg, silentLogger())
-	return uc, repo, tokens
+	uc := NewAuthUseCase(repo, tokens, refresh, &fakeIssuer{}, testHasher(t), cfg, silentLogger())
+	return uc, repo, tokens, refresh
 }
 
 func TestAuthUseCase_Register(t *testing.T) {
@@ -92,14 +101,14 @@ func TestAuthUseCase_Login_Success(t *testing.T) {
 	hash, _ := testHasher(t).Hash("s3cret-pass")
 	repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
 
-	tokenString, expiresAt, user, err := uc.Login(context.Background(), "alice", "s3cret-pass")
+	tokens, user, err := uc.Login(context.Background(), "alice", "s3cret-pass")
 	if err != nil {
 		t.Fatalf("Login() unexpected error: %v", err)
 	}
-	if tokenString == "" {
+	if tokens.AccessToken == "" {
 		t.Error("Login() returned an empty token")
 	}
-	if !expiresAt.After(time.Now()) {
+	if !tokens.AccessExpiresAt.After(time.Now()) {
 		t.Error("Login() expiresAt should be in the future")
 	}
 	if user.Username != "alice" {
@@ -112,7 +121,7 @@ func TestAuthUseCase_Login_WrongPassword(t *testing.T) {
 	hash, _ := testHasher(t).Hash("s3cret-pass")
 	repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
 
-	_, _, _, err := uc.Login(context.Background(), "alice", "wrong-password")
+	_, _, err := uc.Login(context.Background(), "alice", "wrong-password")
 	if !errors.Is(err, apperr.ErrInvalidCredentials) {
 		t.Errorf("Login() with the wrong password error = %v, want apperr.ErrInvalidCredentials", err)
 	}
@@ -121,7 +130,7 @@ func TestAuthUseCase_Login_WrongPassword(t *testing.T) {
 func TestAuthUseCase_Login_UnknownUser_SameErrorAsWrongPassword(t *testing.T) {
 	uc, _, _ := newAuthUseCaseForTest(t, "", "")
 
-	_, _, _, err := uc.Login(context.Background(), "ghost", "whatever")
+	_, _, err := uc.Login(context.Background(), "ghost", "whatever")
 	if !errors.Is(err, apperr.ErrInvalidCredentials) {
 		t.Errorf("Login() for an unknown user error = %v, want apperr.ErrInvalidCredentials", err)
 	}
@@ -131,18 +140,18 @@ func TestAuthUseCase_Login_AdminBootstrap(t *testing.T) {
 	adminHash, _ := testHasher(t).Hash("admin-pass")
 	uc, _, _ := newAuthUseCaseForTest(t, "admin", adminHash)
 
-	tokenString, _, user, err := uc.Login(context.Background(), "admin", "admin-pass")
+	tokens, user, err := uc.Login(context.Background(), "admin", "admin-pass")
 	if err != nil {
 		t.Fatalf("Login() as admin unexpected error: %v", err)
 	}
-	if tokenString == "" {
+	if tokens.AccessToken == "" {
 		t.Error("Login() as admin returned an empty token")
 	}
 	if user.Username != "admin" {
 		t.Errorf("Login() as admin Username = %q, want %q", user.Username, "admin")
 	}
 
-	if _, _, _, err := uc.Login(context.Background(), "admin", "wrong-pass"); !errors.Is(err, apperr.ErrInvalidCredentials) {
+	if _, _, err := uc.Login(context.Background(), "admin", "wrong-pass"); !errors.Is(err, apperr.ErrInvalidCredentials) {
 		t.Errorf("Login() as admin with the wrong password error = %v, want apperr.ErrInvalidCredentials", err)
 	}
 }
@@ -150,7 +159,7 @@ func TestAuthUseCase_Login_AdminBootstrap(t *testing.T) {
 func TestAuthUseCase_Login_AdminBootstrapDisabledWhenUnconfigured(t *testing.T) {
 	uc, _, _ := newAuthUseCaseForTest(t, "", "")
 
-	_, _, _, err := uc.Login(context.Background(), "admin", "admin-pass")
+	_, _, err := uc.Login(context.Background(), "admin", "admin-pass")
 	if !errors.Is(err, apperr.ErrInvalidCredentials) {
 		t.Errorf("Login() for 'admin' with no admin configured error = %v, want apperr.ErrInvalidCredentials", err)
 	}
@@ -181,9 +190,6 @@ func TestAuthUseCase_Register_EnforcesConfiguredLengthPolicy(t *testing.T) {
 	}
 }
 
-// TestAuthUseCase_Register_RejectsReservedAdminName covers the name clash:
-// Login always routes the configured admin name to the bootstrap hash, so an
-// account registered under it could never sign in with its own password.
 func TestAuthUseCase_Register_RejectsReservedAdminName(t *testing.T) {
 	adminHash, _ := testHasher(t).Hash("admin-pass")
 
@@ -209,7 +215,7 @@ func TestAuthUseCase_Register_NameNotReservedWithoutBootstrapAdmin(t *testing.T)
 		t.Fatalf("Register() unexpected error: %v", err)
 	}
 
-	if _, _, _, err := uc.Login(context.Background(), "admin", "user-pass-123"); err != nil {
+	if _, _, err := uc.Login(context.Background(), "admin", "user-pass-123"); err != nil {
 		t.Errorf("Login() for the registered user error = %v, want success", err)
 	}
 	if user.Username != "admin" {
@@ -217,15 +223,12 @@ func TestAuthUseCase_Register_NameNotReservedWithoutBootstrapAdmin(t *testing.T)
 	}
 }
 
-// TestAuthUseCase_Login_BootstrapAdminNameIsMatchedConsistently: the same
-// normalization decides both that a name is reserved and that a login goes
-// to the bootstrap path, so no case variant can fall between the two.
 func TestAuthUseCase_Login_BootstrapAdminNameIsMatchedConsistently(t *testing.T) {
 	adminHash, _ := testHasher(t).Hash("admin-pass")
 	uc, _, _ := newAuthUseCaseForTest(t, "admin", adminHash)
 
 	for _, name := range []string{"admin", "Admin", " ADMIN "} {
-		_, _, user, err := uc.Login(context.Background(), name, "admin-pass")
+		_, user, err := uc.Login(context.Background(), name, "admin-pass")
 		if err != nil {
 			t.Errorf("Login(%q) error = %v, want success", name, err)
 			continue
@@ -236,9 +239,6 @@ func TestAuthUseCase_Login_BootstrapAdminNameIsMatchedConsistently(t *testing.T)
 	}
 }
 
-// TestAuthUseCase_Register_CountsCharactersNotBytes: a Cyrillic or emoji name
-// at the configured limit must be accepted, and one character past it
-// rejected - the limits are stated in characters.
 func TestAuthUseCase_Register_CountsCharactersNotBytes(t *testing.T) {
 	cfg := AuthConfig{MinUsernameLength: 3, MaxUsernameLength: 50, MinPasswordLength: 8}
 
@@ -288,5 +288,232 @@ func TestAuthUseCase_Register_PasswordMinimumIsCharactersCapIsBytes(t *testing.T
 	_, err := uc2.Register(context.Background(), "bob", "b@example.com", strings.Repeat("п", 40))
 	if !errors.Is(err, apperr.ErrValidation) {
 		t.Errorf("a password over bcrypt's 72-byte limit should be rejected, got: %v", err)
+	}
+}
+
+func TestAuthUseCase_Login_IssuesRefreshToken(t *testing.T) {
+	uc, repo, _, refresh := newAuthUseCaseWithRefresh(t, "", "")
+	hash, _ := testHasher(t).Hash("s3cret-pass")
+	repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
+
+	tokens, _, err := uc.Login(context.Background(), "alice", "s3cret-pass")
+	if err != nil {
+		t.Fatalf("Login() unexpected error: %v", err)
+	}
+	if tokens.RefreshToken == "" {
+		t.Fatal("Login() returned no refresh token")
+	}
+	if !tokens.RefreshExpiresAt.After(tokens.AccessExpiresAt) {
+		t.Error("the refresh token should outlive the access token")
+	}
+
+	stored, err := refresh.GetByHash(context.Background(), (&fakeIssuer{}).HashRefreshToken(tokens.RefreshToken))
+	if err != nil {
+		t.Fatalf("the refresh token was not stored: %v", err)
+	}
+	if stored.TokenHash == tokens.RefreshToken {
+		t.Error("the plaintext refresh token must not be stored, only its hash")
+	}
+}
+
+func TestAuthUseCase_Refresh_RotatesAndRevokesTheOldToken(t *testing.T) {
+	uc, repo, _, refresh := newAuthUseCaseWithRefresh(t, "", "")
+	hash, _ := testHasher(t).Hash("s3cret-pass")
+	repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
+
+	first, _, err := uc.Login(context.Background(), "alice", "s3cret-pass")
+	if err != nil {
+		t.Fatalf("Login(): %v", err)
+	}
+
+	second, err := uc.Refresh(context.Background(), first.RefreshToken)
+	if err != nil {
+		t.Fatalf("Refresh(): %v", err)
+	}
+	if second.RefreshToken == first.RefreshToken {
+		t.Error("Refresh() must hand out a new refresh token, not the same one")
+	}
+
+	old, _ := refresh.GetByHash(context.Background(), (&fakeIssuer{}).HashRefreshToken(first.RefreshToken))
+	if old.RevokedAt == nil {
+		t.Error("the rotated-out token should be revoked")
+	}
+
+	if _, err := uc.Refresh(context.Background(), second.RefreshToken); err != nil {
+		t.Errorf("the newest refresh token should still work: %v", err)
+	}
+}
+
+func TestAuthUseCase_Refresh_ReuseOfRevokedTokenKillsEverySession(t *testing.T) {
+	uc, repo, _, refresh := newAuthUseCaseWithRefresh(t, "", "")
+	hash, _ := testHasher(t).Hash("s3cret-pass")
+	user, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
+
+	stolen, _, _ := uc.Login(context.Background(), "alice", "s3cret-pass")
+	fresh, err := uc.Refresh(context.Background(), stolen.RefreshToken)
+	if err != nil {
+		t.Fatalf("Refresh(): %v", err)
+	}
+
+	// The attacker replays the token the legitimate client already rotated.
+	if _, err := uc.Refresh(context.Background(), stolen.RefreshToken); !errors.Is(err, apperr.ErrUnauthorized) {
+		t.Errorf("replaying a revoked token error = %v, want apperr.ErrUnauthorized", err)
+	}
+
+	// The session that replaced it must be taken down as well.
+	if _, err := uc.Refresh(context.Background(), fresh.RefreshToken); !errors.Is(err, apperr.ErrUnauthorized) {
+		t.Errorf("sessions should be revoked after a replay, got: %v", err)
+	}
+
+	stored, _ := refresh.GetByHash(context.Background(), (&fakeIssuer{}).HashRefreshToken(fresh.RefreshToken))
+	if stored.UserID != user.ID || stored.RevokedAt == nil {
+		t.Error("every session of the user should be revoked")
+	}
+}
+
+func TestAuthUseCase_Logout_RevokesTheSession(t *testing.T) {
+	uc, repo, _, _ := newAuthUseCaseWithRefresh(t, "", "")
+	hash, _ := testHasher(t).Hash("s3cret-pass")
+	repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
+
+	tokens, _, _ := uc.Login(context.Background(), "alice", "s3cret-pass")
+
+	if err := uc.Logout(context.Background(), tokens.RefreshToken); err != nil {
+		t.Fatalf("Logout(): %v", err)
+	}
+	if _, err := uc.Refresh(context.Background(), tokens.RefreshToken); !errors.Is(err, apperr.ErrUnauthorized) {
+		t.Errorf("refreshing after logout error = %v, want apperr.ErrUnauthorized", err)
+	}
+}
+
+func TestAuthUseCase_Logout_UnknownTokenIsNotAnError(t *testing.T) {
+	uc, _, _, _ := newAuthUseCaseWithRefresh(t, "", "")
+
+	if err := uc.Logout(context.Background(), "never-issued"); err != nil {
+		t.Errorf("logging out an unknown session should succeed, got: %v", err)
+	}
+}
+
+func TestAuthUseCase_Refresh_ExpiredTokenRejected(t *testing.T) {
+	uc, repo, _, refresh := newAuthUseCaseWithRefresh(t, "", "")
+	hash, _ := testHasher(t).Hash("s3cret-pass")
+	user, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
+
+	issuer := &fakeIssuer{}
+	plain, tokenHash, _ := issuer.NewRefreshToken()
+	refresh.Create(context.Background(), domain.RefreshToken{
+		UserID:    user.ID,
+		TokenHash: tokenHash,
+		ExpiresAt: time.Now().Add(-time.Minute),
+	})
+
+	if _, err := uc.Refresh(context.Background(), plain); !errors.Is(err, apperr.ErrUnauthorized) {
+		t.Errorf("an expired refresh token error = %v, want apperr.ErrUnauthorized", err)
+	}
+}
+
+func TestAuthUseCase_Login_BootstrapAdminGetsNoRefreshToken(t *testing.T) {
+	adminHash, _ := testHasher(t).Hash("admin-pass")
+	uc, _, _, _ := newAuthUseCaseWithRefresh(t, "admin", adminHash)
+
+	tokens, user, err := uc.Login(context.Background(), "admin", "admin-pass")
+	if err != nil {
+		t.Fatalf("Login(): %v", err)
+	}
+	if tokens.AccessToken == "" {
+		t.Error("the admin should still get an access token")
+	}
+	if tokens.RefreshToken != "" {
+		t.Error("the bootstrap admin has no row in users, so it must not get a refresh token")
+	}
+	if user.Username != "admin" {
+		t.Errorf("Username = %q, want admin", user.Username)
+	}
+}
+
+func TestAuthUseCase_Login_IsCaseInsensitiveOnUsername(t *testing.T) {
+	uc, repo, _, _ := newAuthUseCaseWithRefresh(t, "", "")
+	hash, _ := testHasher(t).Hash("s3cret-pass")
+	repo.Create(context.Background(), domain.User{Username: "Alice", Email: "a@example.com", PasswordHash: hash})
+
+	for _, name := range []string{"alice", "ALICE", " Alice "} {
+		if _, _, err := uc.Login(context.Background(), name, "s3cret-pass"); err != nil {
+			t.Errorf("Login(%q) error = %v, want success", name, err)
+		}
+	}
+}
+
+func TestAuthUseCase_Register_RejectsNameTakenInAnotherCase(t *testing.T) {
+	uc, _, _, _ := newAuthUseCaseWithRefresh(t, "", "")
+
+	if _, err := uc.Register(context.Background(), "Alice", "a@example.com", "s3cret-pass"); err != nil {
+		t.Fatalf("first Register(): %v", err)
+	}
+
+	_, err := uc.Register(context.Background(), "alice", "other@example.com", "s3cret-pass")
+	if !errors.Is(err, apperr.ErrConflict) {
+		t.Errorf("registering a name that differs only by case error = %v, want apperr.ErrConflict", err)
+	}
+}
+
+func TestAuthUseCase_Refresh_RollsBackWhenTheReplacementCannotBeStored(t *testing.T) {
+	uc, repo, _, refresh := newAuthUseCaseWithRefresh(t, "", "")
+	hash, _ := testHasher(t).Hash("s3cret-pass")
+	repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
+
+	tokens, _, err := uc.Login(context.Background(), "alice", "s3cret-pass")
+	if err != nil {
+		t.Fatalf("Login(): %v", err)
+	}
+
+	refresh.failInsert = true
+	if _, err := uc.Refresh(context.Background(), tokens.RefreshToken); err == nil {
+		t.Fatal("Refresh() should fail when the replacement cannot be stored")
+	}
+
+	refresh.failInsert = false
+	if _, err := uc.Refresh(context.Background(), tokens.RefreshToken); err != nil {
+		t.Errorf("the presented token must survive a failed rotation, got: %v", err)
+	}
+}
+
+func TestAuthUseCase_Refresh_OnlyOneConcurrentCallerWins(t *testing.T) {
+	uc, repo, _, _ := newAuthUseCaseWithRefresh(t, "", "")
+	hash, _ := testHasher(t).Hash("s3cret-pass")
+	repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
+
+	tokens, _, err := uc.Login(context.Background(), "alice", "s3cret-pass")
+	if err != nil {
+		t.Fatalf("Login(): %v", err)
+	}
+
+	const callers = 8
+	var start sync.WaitGroup
+	var done sync.WaitGroup
+	start.Add(1)
+	done.Add(callers)
+	results := make([]error, callers)
+	for i := 0; i < callers; i++ {
+		go func(i int) {
+			defer done.Done()
+			start.Wait()
+			_, results[i] = uc.Refresh(context.Background(), tokens.RefreshToken)
+		}(i)
+	}
+	start.Done()
+	done.Wait()
+
+	won := 0
+	for _, err := range results {
+		if err == nil {
+			won++
+			continue
+		}
+		if !errors.Is(err, apperr.ErrUnauthorized) {
+			t.Errorf("a losing caller got %v, want apperr.ErrUnauthorized", err)
+		}
+	}
+	if won != 1 {
+		t.Errorf("%d callers exchanged the same token, want exactly 1", won)
 	}
 }

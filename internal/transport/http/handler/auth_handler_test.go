@@ -19,15 +19,23 @@ import (
 
 type fakeAuthService struct {
 	registerFn func(ctx context.Context, username, email, password string) (domain.User, error)
-	loginFn    func(ctx context.Context, username, password string) (string, time.Time, domain.User, error)
+	loginFn    func(ctx context.Context, username, password string) (domain.Tokens, domain.User, error)
+	refreshFn  func(ctx context.Context, refreshToken string) (domain.Tokens, error)
+	logoutFn   func(ctx context.Context, refreshToken string) error
 	validateFn func(ctx context.Context, token string) (domain.Claims, error)
 }
 
 func (f fakeAuthService) Register(ctx context.Context, username, email, password string) (domain.User, error) {
 	return f.registerFn(ctx, username, email, password)
 }
-func (f fakeAuthService) Login(ctx context.Context, username, password string) (string, time.Time, domain.User, error) {
+func (f fakeAuthService) Login(ctx context.Context, username, password string) (domain.Tokens, domain.User, error) {
 	return f.loginFn(ctx, username, password)
+}
+func (f fakeAuthService) Refresh(ctx context.Context, refreshToken string) (domain.Tokens, error) {
+	return f.refreshFn(ctx, refreshToken)
+}
+func (f fakeAuthService) Logout(ctx context.Context, refreshToken string) error {
+	return f.logoutFn(ctx, refreshToken)
 }
 func (f fakeAuthService) ValidateToken(ctx context.Context, token string) (domain.Claims, error) {
 	return f.validateFn(ctx, token)
@@ -39,6 +47,8 @@ func newAuthTestApp(svc domain.AuthService) *fiber.App {
 	auth := app.Group("/auth")
 	auth.Post("/register", h.Register)
 	auth.Post("/login", h.Login)
+	auth.Post("/refresh", h.Refresh)
+	auth.Post("/logout", h.Logout)
 	auth.Get("/me", middleware.Auth(svc), h.Me)
 	return app
 }
@@ -109,8 +119,13 @@ func TestAuthHandler_Register_InvalidEmailRejected(t *testing.T) {
 
 func TestAuthHandler_Login_Success(t *testing.T) {
 	svc := fakeAuthService{
-		loginFn: func(context.Context, string, string) (string, time.Time, domain.User, error) {
-			return "a-jwt-token", time.Now().Add(time.Hour), domain.User{ID: 1, Username: "alice"}, nil
+		loginFn: func(context.Context, string, string) (domain.Tokens, domain.User, error) {
+			return domain.Tokens{
+				AccessToken:      "a-jwt-token",
+				AccessExpiresAt:  time.Now().Add(time.Hour),
+				RefreshToken:     "a-refresh-token",
+				RefreshExpiresAt: time.Now().Add(720 * time.Hour),
+			}, domain.User{ID: 1, Username: "alice"}, nil
 		},
 	}
 	app := newAuthTestApp(svc)
@@ -134,12 +149,18 @@ func TestAuthHandler_Login_Success(t *testing.T) {
 	if got.Token != "a-jwt-token" {
 		t.Errorf("Token = %q, want %q", got.Token, "a-jwt-token")
 	}
+	if got.RefreshToken != "a-refresh-token" {
+		t.Errorf("RefreshToken = %q, want %q", got.RefreshToken, "a-refresh-token")
+	}
+	if got.RefreshExpiresAt == nil {
+		t.Error("RefreshExpiresAt should be set when a refresh token is issued")
+	}
 }
 
 func TestAuthHandler_Login_InvalidCredentials(t *testing.T) {
 	svc := fakeAuthService{
-		loginFn: func(context.Context, string, string) (string, time.Time, domain.User, error) {
-			return "", time.Time{}, domain.User{}, apperr.ErrInvalidCredentials
+		loginFn: func(context.Context, string, string) (domain.Tokens, domain.User, error) {
+			return domain.Tokens{}, domain.User{}, apperr.ErrInvalidCredentials
 		},
 	}
 	app := newAuthTestApp(svc)
