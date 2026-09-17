@@ -26,6 +26,38 @@ func NextStatus(current TaskStatus) TaskStatus {
 	}
 }
 
+type TaskSortField string
+
+const (
+	SortByCreatedAt TaskSortField = "created_at"
+	SortByUpdatedAt TaskSortField = "updated_at"
+	SortByTitle     TaskSortField = "title"
+	SortByStatus    TaskSortField = "status"
+)
+
+type SortOrder string
+
+const (
+	OrderAsc  SortOrder = "asc"
+	OrderDesc SortOrder = "desc"
+)
+
+func IsValidStatus(status TaskStatus) bool {
+	switch status {
+	case StatusCreated, StatusInProgress, StatusCompleted:
+		return true
+	default:
+		return false
+	}
+}
+
+type TaskFilter struct {
+	Status *TaskStatus
+	Sort   TaskSortField
+	Order  SortOrder
+	Page   PageRequest
+}
+
 // Task is the core to-do item entity.
 type Task struct {
 	ID          int64
@@ -40,7 +72,7 @@ type Task struct {
 type TaskRepository interface {
 	Create(ctx context.Context, task Task) (Task, error)
 	GetByID(ctx context.Context, id int64) (Task, error)
-	ListByCreator(ctx context.Context, creatorID int64) ([]Task, error)
+	ListByCreator(ctx context.Context, creatorID int64, filter TaskFilter) (Page[Task], error)
 	Update(ctx context.Context, task Task) (Task, error)
 	Delete(ctx context.Context, id int64) error
 	CompareAndSetStatus(ctx context.Context, id, ownerID int64, from, to TaskStatus) (Task, error)
@@ -49,7 +81,7 @@ type TaskRepository interface {
 type TaskService interface {
 	Create(ctx context.Context, creatorID int64, title, description string) (Task, error)
 	Get(ctx context.Context, requesterID, id int64) (Task, error)
-	List(ctx context.Context, requesterID int64) ([]Task, error)
+	List(ctx context.Context, requesterID int64, filter TaskFilter) (Page[Task], error)
 	Update(ctx context.Context, requesterID, id int64, title, description string) (Task, error)
 	Delete(ctx context.Context, requesterID, id int64) error
 	ToggleStatus(ctx context.Context, requesterID, id int64) (Task, error)

@@ -84,12 +84,17 @@ func (h *TaskHandler) List(c *fiber.Ctx) error {
 		return err
 	}
 
-	tasks, err := h.tasks.List(c.Context(), claims.UserID)
+	filter, err := parseTaskFilter(c)
 	if err != nil {
 		return err
 	}
 
-	return httptransport.JSON(c, fiber.StatusOK, dto.ToTaskListResponse(tasks))
+	page, err := h.tasks.List(c.Context(), claims.UserID, filter)
+	if err != nil {
+		return err
+	}
+
+	return httptransport.JSON(c, fiber.StatusOK, dto.ToTaskPageResponse(page))
 }
 
 func (h *TaskHandler) Update(c *fiber.Ctx) error {

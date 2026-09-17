@@ -17,6 +17,8 @@ type TaskConfig struct {
 	Timeout              time.Duration
 	MaxTitleLength       int
 	MaxDescriptionLength int
+	DefaultPageSize      int
+	MaxPageSize          int
 }
 
 type TaskUseCase struct {
@@ -74,17 +76,23 @@ func (uc *TaskUseCase) Get(ctx context.Context, requesterID, id int64) (domain.T
 	return task, nil
 }
 
-func (uc *TaskUseCase) List(ctx context.Context, requesterID int64) ([]domain.Task, error) {
+func (uc *TaskUseCase) List(ctx context.Context, requesterID int64, filter domain.TaskFilter) (domain.Page[domain.Task], error) {
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
-	tasks, err := uc.repo.ListByCreator(ctx, requesterID)
-	if err != nil {
-		uc.logger.ErrorContext(ctx, "list tasks failed", "error", err, "creator_id", requesterID)
-		return nil, fmt.Errorf("list tasks: %w", err)
+	if filter.Status != nil && !domain.IsValidStatus(*filter.Status) {
+		return domain.Page[domain.Task]{}, fmt.Errorf("%w: unknown status %q", apperr.ErrValidation, *filter.Status)
 	}
 
-	return tasks, nil
+	filter.Page = clampPage(filter.Page, uc.cfg.DefaultPageSize, uc.cfg.MaxPageSize)
+
+	page, err := uc.repo.ListByCreator(ctx, requesterID, filter)
+	if err != nil {
+		uc.logger.ErrorContext(ctx, "list tasks failed", "error", err, "creator_id", requesterID)
+		return domain.Page[domain.Task]{}, fmt.Errorf("list tasks: %w", err)
+	}
+
+	return page, nil
 }
 
 func (uc *TaskUseCase) Update(ctx context.Context, requesterID, id int64, title, description string) (domain.Task, error) {

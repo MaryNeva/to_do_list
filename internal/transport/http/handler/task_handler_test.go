@@ -28,7 +28,7 @@ func (f fakeAuthValidator) ValidateToken(context.Context, string) (domain.Claims
 type fakeTaskService struct {
 	createFn func(ctx context.Context, creatorID int64, title, description string) (domain.Task, error)
 	getFn    func(ctx context.Context, requesterID, id int64) (domain.Task, error)
-	listFn   func(ctx context.Context, requesterID int64) ([]domain.Task, error)
+	listFn   func(ctx context.Context, requesterID int64, filter domain.TaskFilter) (domain.Page[domain.Task], error)
 	updateFn func(ctx context.Context, requesterID, id int64, title, description string) (domain.Task, error)
 	deleteFn func(ctx context.Context, requesterID, id int64) error
 	toggleFn func(ctx context.Context, requesterID, id int64) (domain.Task, error)
@@ -40,8 +40,8 @@ func (f fakeTaskService) Create(ctx context.Context, creatorID int64, title, des
 func (f fakeTaskService) Get(ctx context.Context, requesterID, id int64) (domain.Task, error) {
 	return f.getFn(ctx, requesterID, id)
 }
-func (f fakeTaskService) List(ctx context.Context, requesterID int64) ([]domain.Task, error) {
-	return f.listFn(ctx, requesterID)
+func (f fakeTaskService) List(ctx context.Context, requesterID int64, filter domain.TaskFilter) (domain.Page[domain.Task], error) {
+	return f.listFn(ctx, requesterID, filter)
 }
 func (f fakeTaskService) Update(ctx context.Context, requesterID, id int64, title, description string) (domain.Task, error) {
 	return f.updateFn(ctx, requesterID, id, title, description)
@@ -156,9 +156,9 @@ func TestTaskHandler_Get_InvalidIDRejected(t *testing.T) {
 
 func TestTaskHandler_RequiresAuthentication(t *testing.T) {
 	svc := fakeTaskService{
-		listFn: func(context.Context, int64) ([]domain.Task, error) {
+		listFn: func(context.Context, int64, domain.TaskFilter) (domain.Page[domain.Task], error) {
 			t.Fatal("service should not be called without authentication")
-			return nil, nil
+			return domain.Page[domain.Task]{}, nil
 		},
 	}
 	app := fiber.New(fiber.Config{ErrorHandler: httptransport.NewErrorHandler(silentTestLogger())})

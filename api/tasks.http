@@ -37,3 +37,15 @@ Authorization: Bearer {{token}}
 ### Delete a task
 DELETE {{api}}/tasks/1
 Authorization: Bearer {{token}}
+
+### List with pagination
+GET {{api}}/tasks/?limit=10&offset=0
+Authorization: Bearer {{token}}
+
+### Only the tasks in progress, oldest first
+GET {{api}}/tasks/?status=in_progress&sort=created_at&order=asc
+Authorization: Bearer {{token}}
+
+### Sorted by title
+GET {{api}}/tasks/?sort=title&order=asc&limit=5
+Authorization: Bearer {{token}}

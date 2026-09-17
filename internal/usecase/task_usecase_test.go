@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -47,17 +48,39 @@ func (f *fakeTaskRepo) GetByID(_ context.Context, id int64) (domain.Task, error)
 	return task, nil
 }
 
-func (f *fakeTaskRepo) ListByCreator(_ context.Context, creatorID int64) ([]domain.Task, error) {
+func (f *fakeTaskRepo) ListByCreator(_ context.Context, creatorID int64, filter domain.TaskFilter) (domain.Page[domain.Task], error) {
 	if f.forceErr != nil {
-		return nil, f.forceErr
+		return domain.Page[domain.Task]{}, f.forceErr
 	}
-	var result []domain.Task
+
+	var matched []domain.Task
 	for _, task := range f.tasks {
-		if task.CreatorID == creatorID {
-			result = append(result, task)
+		if task.CreatorID != creatorID {
+			continue
 		}
+		if filter.Status != nil && task.Status != *filter.Status {
+			continue
+		}
+		matched = append(matched, task)
 	}
-	return result, nil
+
+	sort.Slice(matched, func(i, j int) bool {
+		less := matched[i].ID < matched[j].ID
+		if filter.Order == domain.OrderDesc {
+			return !less
+		}
+		return less
+	})
+
+	total := len(matched)
+	if filter.Page.Offset >= total {
+		return domain.NewPage([]domain.Task{}, total, filter.Page), nil
+	}
+	end := filter.Page.Offset + filter.Page.Limit
+	if end > total {
+		end = total
+	}
+	return domain.NewPage(matched[filter.Page.Offset:end], total, filter.Page), nil
 }
 
 func (f *fakeTaskRepo) Update(_ context.Context, task domain.Task) (domain.Task, error) {
@@ -112,6 +135,8 @@ func testTaskConfig() TaskConfig {
 		Timeout:              time.Second,
 		MaxTitleLength:       200,
 		MaxDescriptionLength: 4000,
+		DefaultPageSize:      20,
+		MaxPageSize:          100,
 	}
 }
 
@@ -269,14 +294,14 @@ func TestTaskUseCase_List_ScopedToRequester(t *testing.T) {
 	repo.Create(context.Background(), domain.Task{Title: "user1-b", CreatorID: 1})
 	repo.Create(context.Background(), domain.Task{Title: "user2-a", CreatorID: 2})
 
-	list, err := uc.List(context.Background(), 1)
+	page, err := uc.List(context.Background(), 1, domain.TaskFilter{})
 	if err != nil {
 		t.Fatalf("List() unexpected error: %v", err)
 	}
-	if len(list) != 2 {
-		t.Errorf("List() returned %d tasks, want 2", len(list))
+	if len(page.Items) != 2 {
+		t.Errorf("List() returned %d tasks, want 2", len(page.Items))
 	}
-	for _, task := range list {
+	for _, task := range page.Items {
 		if task.CreatorID != 1 {
 			t.Errorf("List() returned a task owned by %d, want only 1", task.CreatorID)
 		}
@@ -383,5 +408,96 @@ func TestTaskUseCase_ToggleStatus_ForeignTaskStaysNotFound(t *testing.T) {
 	}
 	if repo.tasks[owned.ID].Status != domain.StatusCreated {
 		t.Errorf("a foreign toggle changed the status to %q", repo.tasks[owned.ID].Status)
+	}
+}
+
+func TestTaskUseCase_List_AppliesPaginationDefaultsAndLimits(t *testing.T) {
+	uc, repo := newTaskUseCaseForTest()
+	cfg := testTaskConfig()
+	for i := 0; i < 25; i++ {
+		repo.Create(context.Background(), domain.Task{Title: "t", CreatorID: 1, Status: domain.StatusCreated})
+	}
+
+	tests := []struct {
+		name      string
+		request   domain.PageRequest
+		wantItems int
+		wantLimit int
+	}{
+		{"no limit falls back to the default", domain.PageRequest{}, cfg.DefaultPageSize, cfg.DefaultPageSize},
+		{"explicit limit is honoured", domain.PageRequest{Limit: 5}, 5, 5},
+		{"limit above the maximum is trimmed", domain.PageRequest{Limit: 1000}, 25, cfg.MaxPageSize},
+		{"offset past the end yields no items", domain.PageRequest{Limit: 10, Offset: 100}, 0, 10},
+		{"negative offset starts at the beginning", domain.PageRequest{Limit: 3, Offset: -5}, 3, 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			page, err := uc.List(context.Background(), 1, domain.TaskFilter{Page: tt.request})
+			if err != nil {
+				t.Fatalf("List() unexpected error: %v", err)
+			}
+			if len(page.Items) != tt.wantItems {
+				t.Errorf("items = %d, want %d", len(page.Items), tt.wantItems)
+			}
+			if page.Limit != tt.wantLimit {
+				t.Errorf("Limit = %d, want %d", page.Limit, tt.wantLimit)
+			}
+			if page.Total != 25 {
+				t.Errorf("Total = %d, want 25 regardless of the page size", page.Total)
+			}
+		})
+	}
+}
+
+func TestTaskUseCase_List_FiltersByStatus(t *testing.T) {
+	uc, repo := newTaskUseCaseForTest()
+	repo.Create(context.Background(), domain.Task{Title: "a", CreatorID: 1, Status: domain.StatusCreated})
+	repo.Create(context.Background(), domain.Task{Title: "b", CreatorID: 1, Status: domain.StatusInProgress})
+	repo.Create(context.Background(), domain.Task{Title: "c", CreatorID: 1, Status: domain.StatusInProgress})
+
+	inProgress := domain.StatusInProgress
+	page, err := uc.List(context.Background(), 1, domain.TaskFilter{Status: &inProgress})
+	if err != nil {
+		t.Fatalf("List() unexpected error: %v", err)
+	}
+	if page.Total != 2 || len(page.Items) != 2 {
+		t.Fatalf("got %d of %d tasks, want 2 of 2", len(page.Items), page.Total)
+	}
+	for _, task := range page.Items {
+		if task.Status != domain.StatusInProgress {
+			t.Errorf("filtered list contains a task with status %q", task.Status)
+		}
+	}
+}
+
+func TestTaskUseCase_List_RejectsUnknownStatus(t *testing.T) {
+	uc, _ := newTaskUseCaseForTest()
+
+	unknown := domain.TaskStatus("archived")
+	_, err := uc.List(context.Background(), 1, domain.TaskFilter{Status: &unknown})
+	if !errors.Is(err, apperr.ErrValidation) {
+		t.Errorf("List() with an unknown status error = %v, want apperr.ErrValidation", err)
+	}
+}
+
+func TestTaskUseCase_List_StaysScopedToRequesterWhenPaginated(t *testing.T) {
+	uc, repo := newTaskUseCaseForTest()
+	for i := 0; i < 5; i++ {
+		repo.Create(context.Background(), domain.Task{Title: "mine", CreatorID: 1, Status: domain.StatusCreated})
+		repo.Create(context.Background(), domain.Task{Title: "theirs", CreatorID: 2, Status: domain.StatusCreated})
+	}
+
+	page, err := uc.List(context.Background(), 1, domain.TaskFilter{Page: domain.PageRequest{Limit: 100}})
+	if err != nil {
+		t.Fatalf("List() unexpected error: %v", err)
+	}
+	if page.Total != 5 {
+		t.Errorf("Total = %d, want 5: the count must be scoped to the requester too", page.Total)
+	}
+	for _, task := range page.Items {
+		if task.CreatorID != 1 {
+			t.Errorf("page contains a task owned by %d", task.CreatorID)
+		}
 	}
 }

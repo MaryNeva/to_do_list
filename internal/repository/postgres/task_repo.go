@@ -86,18 +86,33 @@ func (r *TaskRepository) GetByID(ctx context.Context, id int64) (domain.Task, er
 	return model.toDomain(), nil
 }
 
-func (r *TaskRepository) ListByCreator(ctx context.Context, creatorID int64) ([]domain.Task, error) {
-	query := `SELECT ` + taskColumns + ` FROM tasks WHERE creator_id = $1 ORDER BY created_at DESC`
+func (r *TaskRepository) ListByCreator(ctx context.Context, creatorID int64, filter domain.TaskFilter) (domain.Page[domain.Task], error) {
+	args := []any{creatorID}
+	where := "WHERE creator_id = $1"
+	if filter.Status != nil {
+		args = append(args, string(*filter.Status))
+		where += " AND status = $2"
+	}
 
-	rows, err := r.pool.Query(ctx, query, creatorID)
+	var total int
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM tasks `+where, args...).Scan(&total); err != nil {
+		return domain.Page[domain.Task]{}, fmt.Errorf("postgres: count tasks: %w", err)
+	}
+
+	query := `SELECT ` + taskColumns + ` FROM tasks ` + where +
+		` ORDER BY ` + orderClause(filter) +
+		fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+	args = append(args, filter.Page.Limit, filter.Page.Offset)
+
+	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: select tasks: %w", err)
+		return domain.Page[domain.Task]{}, fmt.Errorf("postgres: select tasks: %w", err)
 	}
 	defer rows.Close()
 
 	models, err := pgx.CollectRows(rows, pgx.RowToStructByName[taskModel])
 	if err != nil {
-		return nil, fmt.Errorf("postgres: scan tasks: %w", err)
+		return domain.Page[domain.Task]{}, fmt.Errorf("postgres: scan tasks: %w", err)
 	}
 
 	result := make([]domain.Task, 0, len(models))
@@ -105,7 +120,26 @@ func (r *TaskRepository) ListByCreator(ctx context.Context, creatorID int64) ([]
 		result = append(result, m.toDomain())
 	}
 
-	return result, nil
+	return domain.NewPage(result, total, filter.Page), nil
+}
+
+func orderClause(filter domain.TaskFilter) string {
+	column := "created_at"
+	switch filter.Sort {
+	case domain.SortByUpdatedAt:
+		column = "updated_at"
+	case domain.SortByTitle:
+		column = "title"
+	case domain.SortByStatus:
+		column = "status"
+	}
+
+	direction := "DESC"
+	if filter.Order == domain.OrderAsc {
+		direction = "ASC"
+	}
+
+	return column + " " + direction + ", id " + direction
 }
 
 func (r *TaskRepository) Update(ctx context.Context, task domain.Task) (domain.Task, error) {
