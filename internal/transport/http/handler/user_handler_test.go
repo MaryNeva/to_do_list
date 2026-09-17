@@ -20,7 +20,7 @@ import (
 
 type fakeUserService struct {
 	getFn    func(ctx context.Context, id int64) (domain.User, error)
-	listFn   func(ctx context.Context) ([]domain.User, error)
+	listFn   func(ctx context.Context, page domain.PageRequest) (domain.Page[domain.User], error)
 	updateFn func(ctx context.Context, id int64, username, email, newPassword string) (domain.User, error)
 	deleteFn func(ctx context.Context, id int64) error
 }
@@ -28,7 +28,9 @@ type fakeUserService struct {
 func (f fakeUserService) Get(ctx context.Context, id int64) (domain.User, error) {
 	return f.getFn(ctx, id)
 }
-func (f fakeUserService) List(ctx context.Context) ([]domain.User, error) { return f.listFn(ctx) }
+func (f fakeUserService) List(ctx context.Context, page domain.PageRequest) (domain.Page[domain.User], error) {
+	return f.listFn(ctx, page)
+}
 func (f fakeUserService) Update(ctx context.Context, id int64, username, email, newPassword string) (domain.User, error) {
 	return f.updateFn(ctx, id, username, email, newPassword)
 }
@@ -146,9 +148,9 @@ func TestUserHandler_Get_AdminCanReadAnyUser(t *testing.T) {
 
 func TestUserHandler_List_AdminOnly(t *testing.T) {
 	svc := fakeUserService{
-		listFn: func(context.Context) ([]domain.User, error) {
+		listFn: func(context.Context, domain.PageRequest) (domain.Page[domain.User], error) {
 			t.Fatal("service should not be called by a non-admin")
-			return nil, nil
+			return domain.Page[domain.User]{}, nil
 		},
 	}
 	app := newUserTestApp(svc, domain.Claims{UserID: 1, IsAdmin: false})

@@ -51,12 +51,17 @@ func (h *UserHandler) List(c *fiber.Ctx) error {
 		return apperr.ErrForbidden
 	}
 
-	users, err := h.users.List(c.Context())
+	page, err := parsePageParams(c)
 	if err != nil {
 		return err
 	}
 
-	return httptransport.JSON(c, fiber.StatusOK, dto.ToUserListResponse(users))
+	users, err := h.users.List(c.Context(), page)
+	if err != nil {
+		return err
+	}
+
+	return httptransport.JSON(c, fiber.StatusOK, dto.ToUserPageResponse(users))
 }
 
 func (h *UserHandler) Get(c *fiber.Ctx) error {

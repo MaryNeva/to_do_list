@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,8 @@ import (
 type fakeUserRepo struct {
 	users  map[int64]domain.User
 	nextID int64
+
+	onSessionRevocation func(userID int64)
 }
 
 func newFakeUserRepo() *fakeUserRepo {
@@ -26,7 +29,7 @@ func newFakeUserRepo() *fakeUserRepo {
 
 func (f *fakeUserRepo) Create(_ context.Context, user domain.User) (domain.User, error) {
 	for _, existing := range f.users {
-		if existing.Username == user.Username || existing.Email == user.Email {
+		if strings.EqualFold(existing.Username, user.Username) || existing.Email == user.Email {
 			return domain.User{}, apperr.ErrConflict
 		}
 	}
@@ -48,19 +51,34 @@ func (f *fakeUserRepo) GetByID(_ context.Context, id int64) (domain.User, error)
 
 func (f *fakeUserRepo) GetByUsername(_ context.Context, username string) (domain.User, error) {
 	for _, user := range f.users {
-		if user.Username == username {
+		if strings.EqualFold(user.Username, username) {
 			return user, nil
 		}
 	}
 	return domain.User{}, apperr.ErrNotFound
 }
 
-func (f *fakeUserRepo) List(_ context.Context) ([]domain.User, error) {
-	var result []domain.User
-	for _, user := range f.users {
-		result = append(result, user)
+func (f *fakeUserRepo) List(_ context.Context, page domain.PageRequest) (domain.Page[domain.User], error) {
+	ids := make([]int64, 0, len(f.users))
+	for id := range f.users {
+		ids = append(ids, id)
 	}
-	return result, nil
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	total := len(ids)
+	if page.Offset >= total {
+		return domain.NewPage([]domain.User{}, total, page), nil
+	}
+	end := page.Offset + page.Limit
+	if end > total {
+		end = total
+	}
+
+	result := make([]domain.User, 0, end-page.Offset)
+	for _, id := range ids[page.Offset:end] {
+		result = append(result, f.users[id])
+	}
+	return domain.NewPage(result, total, page), nil
 }
 
 func (f *fakeUserRepo) Update(_ context.Context, id int64, fields domain.UserUpdate) (domain.User, error) {
@@ -71,7 +89,7 @@ func (f *fakeUserRepo) Update(_ context.Context, id int64, fields domain.UserUpd
 	// Mirrors the SQL COALESCE: only non-nil fields are written.
 	if fields.Username != nil {
 		for _, other := range f.users {
-			if other.ID != id && other.Username == *fields.Username {
+			if other.ID != id && strings.EqualFold(other.Username, *fields.Username) {
 				return domain.User{}, apperr.ErrConflict
 			}
 		}
@@ -85,6 +103,17 @@ func (f *fakeUserRepo) Update(_ context.Context, id int64, fields domain.UserUpd
 	}
 	user.UpdatedAt = time.Now()
 	f.users[id] = user
+	return user, nil
+}
+
+func (f *fakeUserRepo) UpdateAndRevokeSessions(ctx context.Context, id int64, fields domain.UserUpdate) (domain.User, error) {
+	user, err := f.Update(ctx, id, fields)
+	if err != nil {
+		return domain.User{}, err
+	}
+	if f.onSessionRevocation != nil {
+		f.onSessionRevocation(id)
+	}
 	return user, nil
 }
 
@@ -111,6 +140,8 @@ func testUserConfig() UserConfig {
 		MinUsernameLength: 3,
 		MaxUsernameLength: 50,
 		MinPasswordLength: 8,
+		DefaultPageSize:   20,
+		MaxPageSize:       100,
 	}
 }
 

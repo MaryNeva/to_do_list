@@ -19,6 +19,8 @@ type UserConfig struct {
 	MinUsernameLength int
 	MaxUsernameLength int
 	MinPasswordLength int
+	DefaultPageSize   int
+	MaxPageSize       int
 	AdminUsername     string
 }
 
@@ -41,13 +43,16 @@ func (uc *UserUseCase) Get(ctx context.Context, id int64) (domain.User, error) {
 	return uc.repo.GetByID(ctx, id)
 }
 
-func (uc *UserUseCase) List(ctx context.Context) ([]domain.User, error) {
+func (uc *UserUseCase) List(ctx context.Context, page domain.PageRequest) (domain.Page[domain.User], error) {
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
-	users, err := uc.repo.List(ctx)
+
+	page = clampPage(page, uc.cfg.DefaultPageSize, uc.cfg.MaxPageSize)
+
+	users, err := uc.repo.List(ctx, page)
 	if err != nil {
 		uc.logger.ErrorContext(ctx, "list users failed", "error", err)
-		return nil, fmt.Errorf("list users: %w", err)
+		return domain.Page[domain.User]{}, fmt.Errorf("list users: %w", err)
 	}
 	return users, nil
 }
@@ -81,7 +86,12 @@ func (uc *UserUseCase) Update(ctx context.Context, id int64, username, email, ne
 		fields.PasswordHash = &hash
 	}
 
-	updated, err := uc.repo.Update(ctx, id, fields)
+	update := uc.repo.Update
+	if fields.PasswordHash != nil {
+		update = uc.repo.UpdateAndRevokeSessions
+	}
+
+	updated, err := update(ctx, id, fields)
 	if err != nil {
 		if errors.Is(err, apperr.ErrNotFound) || errors.Is(err, apperr.ErrConflict) {
 			return domain.User{}, err
@@ -135,4 +145,17 @@ func validatePassword(plain string, min int) error {
 	default:
 		return nil
 	}
+}
+
+func clampPage(page domain.PageRequest, defaultSize, maxSize int) domain.PageRequest {
+	if page.Limit <= 0 {
+		page.Limit = defaultSize
+	}
+	if page.Limit > maxSize {
+		page.Limit = maxSize
+	}
+	if page.Offset < 0 {
+		page.Offset = 0
+	}
+	return page
 }
