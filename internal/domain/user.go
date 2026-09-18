@@ -6,12 +6,13 @@ import (
 )
 
 type User struct {
-	ID           int64
-	Username     string
-	Email        string
-	PasswordHash string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID                 int64
+	Username           string
+	Email              string
+	PasswordHash       string
+	CredentialsVersion int64
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 type Claims struct {
@@ -32,7 +33,7 @@ type UserRepository interface {
 	GetByUsername(ctx context.Context, username string) (User, error)
 	List(ctx context.Context, page PageRequest) (Page[User], error)
 	Update(ctx context.Context, id int64, fields UserUpdate) (User, error)
-	UpdateAndRevokeSessions(ctx context.Context, id int64, fields UserUpdate) (User, error)
+	UpdateAndRevokeSessions(ctx context.Context, id int64, fields UserUpdate) (User, int64, error)
 
 	Delete(ctx context.Context, id int64) error
 }

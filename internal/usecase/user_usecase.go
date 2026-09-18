@@ -88,12 +88,11 @@ func (uc *UserUseCase) Update(ctx context.Context, id int64, username, email, ne
 		fields.PasswordHash = &hash
 	}
 
-	update := uc.repo.Update
-	if fields.PasswordHash != nil {
-		update = uc.repo.UpdateAndRevokeSessions
+	if fields.PasswordHash == nil {
+		return uc.update(ctx, id, fields)
 	}
 
-	updated, err := update(ctx, id, fields)
+	updated, revoked, err := uc.repo.UpdateAndRevokeSessions(ctx, id, fields)
 	if err != nil {
 		if errors.Is(err, apperr.ErrNotFound) || errors.Is(err, apperr.ErrConflict) {
 			return domain.User{}, err
@@ -102,8 +101,19 @@ func (uc *UserUseCase) Update(ctx context.Context, id int64, username, email, ne
 		return domain.User{}, fmt.Errorf("update user: %w", err)
 	}
 
-	if fields.PasswordHash != nil {
-		uc.metrics.SessionsRevoked(ReasonPasswordChange)
+	uc.metrics.SessionsRevoked(ReasonPasswordChange, revoked)
+
+	return updated, nil
+}
+
+func (uc *UserUseCase) update(ctx context.Context, id int64, fields domain.UserUpdate) (domain.User, error) {
+	updated, err := uc.repo.Update(ctx, id, fields)
+	if err != nil {
+		if errors.Is(err, apperr.ErrNotFound) || errors.Is(err, apperr.ErrConflict) {
+			return domain.User{}, err
+		}
+		uc.logger.ErrorContext(ctx, "update user failed", "error", err, "user_id", id)
+		return domain.User{}, fmt.Errorf("update user: %w", err)
 	}
 
 	return updated, nil

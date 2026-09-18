@@ -13,32 +13,42 @@ import (
 	"to-do-list/internal/domain"
 )
 
-const userColumns = "id, username, email, password_hash, created_at, updated_at"
+const userColumns = "id, username, email, password_hash, credentials_version, created_at, updated_at"
 
 const updateUserQuery = `UPDATE users
-          SET username      = COALESCE($2, username),
-              email         = COALESCE($3, email),
-              password_hash = COALESCE($4, password_hash)
+          SET username            = COALESCE($2, username),
+              email               = COALESCE($3, email),
+              password_hash       = COALESCE($4, password_hash),
+              credentials_version = credentials_version + $5
           WHERE id = $1
           RETURNING ` + userColumns
 
+func credentialsBump(fields domain.UserUpdate) int64 {
+	if fields.PasswordHash != nil {
+		return 1
+	}
+	return 0
+}
+
 type userModel struct {
-	ID           int64     `db:"id"`
-	Username     string    `db:"username"`
-	Email        string    `db:"email"`
-	PasswordHash string    `db:"password_hash"`
-	CreatedAt    time.Time `db:"created_at"`
-	UpdatedAt    time.Time `db:"updated_at"`
+	ID                 int64     `db:"id"`
+	Username           string    `db:"username"`
+	Email              string    `db:"email"`
+	PasswordHash       string    `db:"password_hash"`
+	CredentialsVersion int64     `db:"credentials_version"`
+	CreatedAt          time.Time `db:"created_at"`
+	UpdatedAt          time.Time `db:"updated_at"`
 }
 
 func (m userModel) toDomain() domain.User {
 	return domain.User{
-		ID:           m.ID,
-		Username:     m.Username,
-		Email:        m.Email,
-		PasswordHash: m.PasswordHash,
-		CreatedAt:    m.CreatedAt,
-		UpdatedAt:    m.UpdatedAt,
+		ID:                 m.ID,
+		Username:           m.Username,
+		Email:              m.Email,
+		PasswordHash:       m.PasswordHash,
+		CredentialsVersion: m.CredentialsVersion,
+		CreatedAt:          m.CreatedAt,
+		UpdatedAt:          m.UpdatedAt,
 	}
 }
 
@@ -145,7 +155,7 @@ func (r *UserRepository) List(ctx context.Context, page domain.PageRequest) (dom
 }
 
 func (r *UserRepository) Update(ctx context.Context, id int64, fields domain.UserUpdate) (domain.User, error) {
-	rows, err := r.pool.Query(ctx, updateUserQuery, id, fields.Username, fields.Email, fields.PasswordHash)
+	rows, err := r.pool.Query(ctx, updateUserQuery, id, fields.Username, fields.Email, fields.PasswordHash, credentialsBump(fields))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return domain.User{}, apperr.ErrConflict
@@ -168,50 +178,51 @@ func (r *UserRepository) Update(ctx context.Context, id int64, fields domain.Use
 	return model.toDomain(), nil
 }
 
-func (r *UserRepository) UpdateAndRevokeSessions(ctx context.Context, id int64, fields domain.UserUpdate) (domain.User, error) {
+func (r *UserRepository) UpdateAndRevokeSessions(ctx context.Context, id int64, fields domain.UserUpdate) (domain.User, int64, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return domain.User{}, fmt.Errorf("postgres: begin update user: %w", err)
+		return domain.User{}, 0, fmt.Errorf("postgres: begin update user: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
 	var locked int64
 	if err := tx.QueryRow(ctx, `SELECT id FROM users WHERE id = $1 FOR UPDATE`, id).Scan(&locked); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return domain.User{}, apperr.ErrNotFound
+			return domain.User{}, 0, apperr.ErrNotFound
 		}
-		return domain.User{}, fmt.Errorf("postgres: lock user: %w", err)
+		return domain.User{}, 0, fmt.Errorf("postgres: lock user: %w", err)
 	}
 
-	rows, err := tx.Query(ctx, updateUserQuery, id, fields.Username, fields.Email, fields.PasswordHash)
+	rows, err := tx.Query(ctx, updateUserQuery, id, fields.Username, fields.Email, fields.PasswordHash, credentialsBump(fields))
 	if err != nil {
 		if isUniqueViolation(err) {
-			return domain.User{}, apperr.ErrConflict
+			return domain.User{}, 0, apperr.ErrConflict
 		}
-		return domain.User{}, fmt.Errorf("postgres: update user: %w", err)
+		return domain.User{}, 0, fmt.Errorf("postgres: update user: %w", err)
 	}
 	model, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByName[userModel])
 	rows.Close()
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return domain.User{}, apperr.ErrNotFound
+			return domain.User{}, 0, apperr.ErrNotFound
 		}
 		if isUniqueViolation(err) {
-			return domain.User{}, apperr.ErrConflict
+			return domain.User{}, 0, apperr.ErrConflict
 		}
-		return domain.User{}, fmt.Errorf("postgres: scan updated user: %w", err)
+		return domain.User{}, 0, fmt.Errorf("postgres: scan updated user: %w", err)
 	}
 
-	if _, err := tx.Exec(ctx,
-		`UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, id); err != nil {
-		return domain.User{}, fmt.Errorf("postgres: revoke sessions of user: %w", err)
+	tag, err := tx.Exec(ctx,
+		`UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, id)
+	if err != nil {
+		return domain.User{}, 0, fmt.Errorf("postgres: revoke sessions of user: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return domain.User{}, fmt.Errorf("postgres: commit update user: %w", err)
+		return domain.User{}, 0, fmt.Errorf("postgres: commit update user: %w", err)
 	}
 
-	return model.toDomain(), nil
+	return model.toDomain(), tag.RowsAffected(), nil
 }
 
 func (r *UserRepository) Delete(ctx context.Context, id int64) error {

@@ -17,10 +17,10 @@ import (
 )
 
 type fakeUserRepo struct {
-	users  map[int64]domain.User
-	nextID int64
-
-	onSessionRevocation func(userID int64)
+	users               map[int64]domain.User
+	nextID              int64
+	onSessionRevocation func(userID int64) int64
+	getByIDErr          error
 }
 
 func newFakeUserRepo() *fakeUserRepo {
@@ -42,6 +42,9 @@ func (f *fakeUserRepo) Create(_ context.Context, user domain.User) (domain.User,
 }
 
 func (f *fakeUserRepo) GetByID(_ context.Context, id int64) (domain.User, error) {
+	if f.getByIDErr != nil {
+		return domain.User{}, f.getByIDErr
+	}
 	user, ok := f.users[id]
 	if !ok {
 		return domain.User{}, apperr.ErrNotFound
@@ -100,21 +103,24 @@ func (f *fakeUserRepo) Update(_ context.Context, id int64, fields domain.UserUpd
 	}
 	if fields.PasswordHash != nil {
 		user.PasswordHash = *fields.PasswordHash
+		// Mirrors credentials_version = credentials_version + 1.
+		user.CredentialsVersion++
 	}
 	user.UpdatedAt = time.Now()
 	f.users[id] = user
 	return user, nil
 }
 
-func (f *fakeUserRepo) UpdateAndRevokeSessions(ctx context.Context, id int64, fields domain.UserUpdate) (domain.User, error) {
+func (f *fakeUserRepo) UpdateAndRevokeSessions(ctx context.Context, id int64, fields domain.UserUpdate) (domain.User, int64, error) {
 	user, err := f.Update(ctx, id, fields)
 	if err != nil {
-		return domain.User{}, err
+		return domain.User{}, 0, err
 	}
+	var revoked int64
 	if f.onSessionRevocation != nil {
-		f.onSessionRevocation(id)
+		revoked = f.onSessionRevocation(id)
 	}
-	return user, nil
+	return user, revoked, nil
 }
 
 func (f *fakeUserRepo) Delete(_ context.Context, id int64) error {
