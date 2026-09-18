@@ -38,7 +38,7 @@ func newAuthUseCaseForTest(t *testing.T, adminUsername, adminPasswordHash string
 	return uc, repo, tokens
 }
 
-func newAuthUseCaseWithRefresh(t *testing.T, adminUsername, adminPasswordHash string) (*AuthUseCase, *fakeUserRepo, *fakeTokenService, *fakeRefreshRepo) {
+func newAuthUseCaseWithRefresh(t *testing.T, adminUsername, adminPasswordHash string, opts ...Option) (*AuthUseCase, *fakeUserRepo, *fakeTokenService, *fakeRefreshRepo) {
 	t.Helper()
 	repo := newFakeUserRepo()
 	tokens := &fakeTokenService{}
@@ -52,7 +52,7 @@ func newAuthUseCaseWithRefresh(t *testing.T, adminUsername, adminPasswordHash st
 		MinPasswordLength: 8,
 		RefreshTTL:        720 * time.Hour,
 	}
-	uc := NewAuthUseCase(repo, tokens, refresh, &fakeIssuer{}, testHasher(t), cfg, silentLogger())
+	uc := NewAuthUseCase(repo, tokens, refresh, &fakeIssuer{}, testHasher(t), cfg, silentLogger(), opts...)
 	return uc, repo, tokens, refresh
 }
 
@@ -205,8 +205,6 @@ func TestAuthUseCase_Register_RejectsReservedAdminName(t *testing.T) {
 	}
 }
 
-// TestAuthUseCase_Register_NameNotReservedWithoutBootstrapAdmin: with no
-// bootstrap admin configured the name is an ordinary one.
 func TestAuthUseCase_Register_NameNotReservedWithoutBootstrapAdmin(t *testing.T) {
 	uc, _, _ := newAuthUseCaseForTest(t, "", "")
 
@@ -273,8 +271,6 @@ func TestAuthUseCase_Register_CountsCharactersNotBytes(t *testing.T) {
 	}
 }
 
-// TestAuthUseCase_Register_PasswordMinimumIsCharactersCapIsBytes: the minimum
-// is a policy stated in characters, the maximum is bcrypt's 72-byte limit.
 func TestAuthUseCase_Register_PasswordMinimumIsCharactersCapIsBytes(t *testing.T) {
 	uc, _, _ := newAuthUseCaseForTest(t, "", "")
 

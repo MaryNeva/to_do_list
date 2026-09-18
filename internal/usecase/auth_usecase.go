@@ -31,6 +31,7 @@ type AuthUseCase struct {
 	hasher  *password.Hasher
 	cfg     AuthConfig
 	logger  *slog.Logger
+	metrics MetricsRecorder
 }
 
 type AuthConfig struct {
@@ -51,7 +52,10 @@ func NewAuthUseCase(
 	hasher *password.Hasher,
 	cfg AuthConfig,
 	logger *slog.Logger,
+	opts ...Option,
 ) *AuthUseCase {
+	resolved := applyOptions(opts)
+
 	return &AuthUseCase{
 		users:   users,
 		tokens:  tokens,
@@ -60,12 +64,19 @@ func NewAuthUseCase(
 		hasher:  hasher,
 		cfg:     cfg,
 		logger:  logger,
+		metrics: resolved.metrics,
 	}
 }
 
 var _ domain.AuthService = (*AuthUseCase)(nil)
 
 func (a *AuthUseCase) Register(ctx context.Context, username, email, plainPassword string) (domain.User, error) {
+	user, err := a.register(ctx, username, email, plainPassword)
+	a.metrics.AuthAttempt(OperationRegister, outcomeOf(err))
+	return user, err
+}
+
+func (a *AuthUseCase) register(ctx context.Context, username, email, plainPassword string) (domain.User, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.cfg.Timeout)
 	defer cancel()
 
@@ -108,6 +119,12 @@ func (a *AuthUseCase) Register(ctx context.Context, username, email, plainPasswo
 }
 
 func (a *AuthUseCase) Login(ctx context.Context, username, plainPassword string) (domain.Tokens, domain.User, error) {
+	tokens, user, err := a.login(ctx, username, plainPassword)
+	a.metrics.AuthAttempt(OperationLogin, outcomeOf(err))
+	return tokens, user, err
+}
+
+func (a *AuthUseCase) login(ctx context.Context, username, plainPassword string) (domain.Tokens, domain.User, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.cfg.Timeout)
 	defer cancel()
 
@@ -122,8 +139,7 @@ func (a *AuthUseCase) Login(ctx context.Context, username, plainPassword string)
 		if err != nil {
 			return domain.Tokens{}, domain.User{}, fmt.Errorf("generate token: %w", err)
 		}
-		// The bootstrap admin has no row in users, so it cannot own a
-		// refresh token; it re-authenticates with its configured password.
+
 		return domain.Tokens{AccessToken: access, AccessExpiresAt: expiresAt}, admin, nil
 	}
 
@@ -170,17 +186,24 @@ func (a *AuthUseCase) Refresh(ctx context.Context, refreshToken string) (domain.
 	}, now)
 	switch {
 	case err == nil:
+		a.metrics.RefreshRotation(OutcomeSuccess)
 	case errors.Is(err, apperr.ErrConflict):
+		a.metrics.RefreshRotation(OutcomeReuse)
+		a.metrics.SessionsRevoked(ReasonTokenReuse)
+
 		if revokeErr := a.refresh.RevokeAllForUser(ctx, result.UserID); revokeErr != nil {
 			a.logger.ErrorContext(ctx, "revoking sessions after refresh token reuse failed", "error", revokeErr, "user_id", result.UserID)
 		}
 		a.logger.WarnContext(ctx, "refresh token reused after it was consumed", "user_id", result.UserID)
 		return domain.Tokens{}, fmt.Errorf("%w: refresh token is no longer valid", apperr.ErrUnauthorized)
 	case errors.Is(err, apperr.ErrNotFound):
+		a.metrics.RefreshRotation(OutcomeUnknown)
 		return domain.Tokens{}, fmt.Errorf("%w: unknown refresh token", apperr.ErrUnauthorized)
 	case errors.Is(err, apperr.ErrUnauthorized):
+		a.metrics.RefreshRotation(OutcomeExpired)
 		return domain.Tokens{}, err
 	default:
+		a.metrics.RefreshRotation(OutcomeFailure)
 		return domain.Tokens{}, fmt.Errorf("rotate refresh token: %w", err)
 	}
 
@@ -216,7 +239,10 @@ func (a *AuthUseCase) Logout(ctx context.Context, refreshToken string) error {
 
 	err := a.refresh.Revoke(ctx, a.issuer.HashRefreshToken(refreshToken))
 	switch {
-	case err == nil, errors.Is(err, apperr.ErrNotFound):
+	case err == nil:
+		a.metrics.SessionsRevoked(ReasonLogout)
+		return nil
+	case errors.Is(err, apperr.ErrNotFound):
 		return nil
 	default:
 		return fmt.Errorf("revoke refresh token: %w", err)
