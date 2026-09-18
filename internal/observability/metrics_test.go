@@ -66,7 +66,7 @@ func TestBusinessCounters_AreLabelledByOutcome(t *testing.T) {
 	m.AuthAttempt("login", "rejected")
 	m.AuthAttempt("login", "rejected")
 	m.RefreshRotation("reuse")
-	m.SessionsRevoked("token_reuse")
+	m.SessionsRevoked("token_reuse", 1)
 
 	expected := `
 # HELP todo_auth_attempts_total Authentication operations, by operation and outcome.
@@ -101,8 +101,6 @@ func TestCleanupRun_RecordsOutcomeAndVolume(t *testing.T) {
 	}
 }
 
-// build_info carries the revision as labels so a dashboard can tell which
-// binary produced a sample; the value itself is always 1.
 func TestBuildInfo_IsExposedAsLabels(t *testing.T) {
 	m := newTestMetrics()
 
@@ -129,9 +127,6 @@ func TestHandler_RendersTheExpositionFormat(t *testing.T) {
 	}
 }
 
-// A counter that has never fired is absent from the exposition, which reads as
-// "no data" on a dashboard - the same as a broken exporter. Preloading the
-// known combinations makes silence look like zero.
 func TestPreload_MakesKnownSeriesStartAtZero(t *testing.T) {
 	m := newTestMetrics()
 

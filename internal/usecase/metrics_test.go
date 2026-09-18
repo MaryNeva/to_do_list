@@ -21,17 +21,19 @@ type recordedCleanup struct {
 type fakeMetrics struct {
 	mu sync.Mutex
 
-	auth     map[string]int
-	rotation map[string]int
-	revoked  map[string]int
-	cleanups []recordedCleanup
+	auth            map[string]int
+	rotation        map[string]int
+	revoked         map[string]int
+	revocationCalls map[string]int
+	cleanups        []recordedCleanup
 }
 
 func newFakeMetrics() *fakeMetrics {
 	return &fakeMetrics{
-		auth:     map[string]int{},
-		rotation: map[string]int{},
-		revoked:  map[string]int{},
+		auth:            map[string]int{},
+		rotation:        map[string]int{},
+		revoked:         map[string]int{},
+		revocationCalls: map[string]int{},
 	}
 }
 
@@ -47,10 +49,11 @@ func (f *fakeMetrics) RefreshRotation(outcome string) {
 	f.rotation[outcome]++
 }
 
-func (f *fakeMetrics) SessionsRevoked(reason string) {
+func (f *fakeMetrics) SessionsRevoked(reason string, count int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.revoked[reason]++
+	f.revoked[reason] += int(count)
+	f.revocationCalls[reason]++
 }
 
 func (f *fakeMetrics) CleanupRun(outcome string, removed int64, d time.Duration) {
@@ -237,6 +240,9 @@ func TestUserUseCase_RecordsSessionRevocationOnPasswordChangeOnly(t *testing.T) 
 	repo := newFakeUserRepo()
 	hasher := testHasher(t)
 
+	var sessionsToRevoke int64
+	repo.onSessionRevocation = func(int64) int64 { return sessionsToRevoke }
+
 	uc := NewUserUseCase(repo, hasher, UserConfig{
 		Timeout:           time.Second,
 		MinUsernameLength: 3,
@@ -260,17 +266,126 @@ func TestUserUseCase_RecordsSessionRevocationOnPasswordChangeOnly(t *testing.T) 
 		t.Fatalf("seed user: %v", err)
 	}
 
+	sessionsToRevoke = 5
 	if _, err := uc.Update(ctx, created.ID, "", "new@example.com", ""); err != nil {
 		t.Fatalf("Update(email) unexpected error: %v", err)
 	}
-	if got := metrics.count(metrics.revoked, ReasonPasswordChange); got != 0 {
-		t.Errorf("changing an email revoked sessions %d times, want 0", got)
+	if got := metrics.count(metrics.revocationCalls, ReasonPasswordChange); got != 0 {
+		t.Errorf("changing an email touched the counter %d times, want 0", got)
 	}
 
-	if _, err := uc.Update(ctx, created.ID, "", "", "brand-new-password"); err != nil {
+	sessionsToRevoke = 0
+	if _, err := uc.Update(ctx, created.ID, "", "", "first-new-password"); err != nil {
+		t.Fatalf("Update(password) unexpected error: %v", err)
+	}
+	if got := metrics.count(metrics.revoked, ReasonPasswordChange); got != 0 {
+		t.Errorf("sessions revoked = %d, want 0 when the account had none", got)
+	}
+
+	sessionsToRevoke = 1
+	if _, err := uc.Update(ctx, created.ID, "", "", "second-new-password"); err != nil {
 		t.Fatalf("Update(password) unexpected error: %v", err)
 	}
 	if got := metrics.count(metrics.revoked, ReasonPasswordChange); got != 1 {
-		t.Errorf("sessions revoked on password change = %d, want 1", got)
+		t.Errorf("sessions revoked = %d, want 1", got)
+	}
+
+	sessionsToRevoke = 3
+	if _, err := uc.Update(ctx, created.ID, "", "", "third-new-password"); err != nil {
+		t.Fatalf("Update(password) unexpected error: %v", err)
+	}
+	if got := metrics.count(metrics.revoked, ReasonPasswordChange); got != 4 {
+		t.Errorf("sessions revoked = %d, want 4 (1 + 3)", got)
+	}
+}
+
+func TestUserUseCase_FailedPasswordChangeRecordsNoRevocation(t *testing.T) {
+	metrics := newFakeMetrics()
+	repo := newFakeUserRepo()
+	hasher := testHasher(t)
+
+	uc := NewUserUseCase(repo, hasher, UserConfig{
+		Timeout:           time.Second,
+		MinUsernameLength: 3,
+		MaxUsernameLength: 50,
+		MinPasswordLength: 8,
+		DefaultPageSize:   20,
+		MaxPageSize:       100,
+	}, silentLogger(), WithMetrics(metrics))
+
+	if _, err := uc.Update(context.Background(), 404, "", "", "brand-new-password"); err == nil {
+		t.Fatal("updating a user that does not exist should fail")
+	}
+
+	if got := metrics.count(metrics.revocationCalls, ReasonPasswordChange); got != 0 {
+		t.Errorf("a failed update touched the counter %d times, want 0", got)
+	}
+}
+
+func TestAuthUseCase_ReuseCountsEverySessionItEnded(t *testing.T) {
+	metrics := newFakeMetrics()
+	uc, _, _, _ := newAuthUseCaseWithRefresh(t, "", "", WithMetrics(metrics))
+	ctx := context.Background()
+
+	if _, err := uc.Register(ctx, "mary", "mary@example.com", "password123"); err != nil {
+		t.Fatalf("Register() unexpected error: %v", err)
+	}
+
+	// Three devices logged in; one of their tokens is then replayed.
+	var replayed string
+	for i := 0; i < 3; i++ {
+		tokens, _, err := uc.Login(ctx, "mary", "password123")
+		if err != nil {
+			t.Fatalf("Login() unexpected error: %v", err)
+		}
+		replayed = tokens.RefreshToken
+	}
+
+	if _, err := uc.Refresh(ctx, replayed); err != nil {
+		t.Fatalf("Refresh() unexpected error: %v", err)
+	}
+	if _, err := uc.Refresh(ctx, replayed); err == nil {
+		t.Fatal("replaying a consumed token should fail")
+	}
+
+	// Two untouched sessions plus the replacement the first refresh issued.
+	if got := metrics.count(metrics.revoked, ReasonTokenReuse); got != 3 {
+		t.Errorf("sessions revoked on reuse = %d, want 3", got)
+	}
+	if got := metrics.count(metrics.revocationCalls, ReasonTokenReuse); got != 1 {
+		t.Errorf("the counter was touched %d times, want 1", got)
+	}
+}
+
+// A revocation that failed ended nothing, so reporting sessions closed would
+// be a lie that hides the failure.
+func TestAuthUseCase_FailedRevocationAfterReuseRecordsNothing(t *testing.T) {
+	metrics := newFakeMetrics()
+	uc, _, _, refresh := newAuthUseCaseWithRefresh(t, "", "", WithMetrics(metrics))
+	ctx := context.Background()
+
+	if _, err := uc.Register(ctx, "mary", "mary@example.com", "password123"); err != nil {
+		t.Fatalf("Register() unexpected error: %v", err)
+	}
+	tokens, _, err := uc.Login(ctx, "mary", "password123")
+	if err != nil {
+		t.Fatalf("Login() unexpected error: %v", err)
+	}
+	if _, err := uc.Refresh(ctx, tokens.RefreshToken); err != nil {
+		t.Fatalf("Refresh() unexpected error: %v", err)
+	}
+
+	refresh.revokeAllErr = errors.New("connection reset")
+
+	if _, err := uc.Refresh(ctx, tokens.RefreshToken); err == nil {
+		t.Fatal("replaying a consumed token should fail")
+	}
+
+	if got := metrics.count(metrics.revocationCalls, ReasonTokenReuse); got != 0 {
+		t.Errorf("a failed revocation touched the counter %d times, want 0", got)
+	}
+	// The replay itself is still reported, so the signal is not lost.
+	if got := metrics.count(metrics.rotation, OutcomeReuse); got != 1 {
+		t.Errorf("reuse rotations = %d, want 1", got)
 	}
 }

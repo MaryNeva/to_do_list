@@ -116,8 +116,6 @@ func New(namespace string, build buildinfo.Info) *Metrics {
 	return m
 }
 
-// KnownLabels lists the label values that exist before anything has happened.
-// The vocabulary lives in the use-case layer, so the caller supplies it.
 type KnownLabels struct {
 	AuthOperations    []string
 	AuthOutcomes      []string
@@ -172,8 +170,11 @@ func (m *Metrics) RefreshRotation(outcome string) {
 	m.refreshRotations.WithLabelValues(outcome).Inc()
 }
 
-func (m *Metrics) SessionsRevoked(reason string) {
-	m.sessionsRevoked.WithLabelValues(reason).Inc()
+func (m *Metrics) SessionsRevoked(reason string, count int64) {
+	if count <= 0 {
+		return
+	}
+	m.sessionsRevoked.WithLabelValues(reason).Add(float64(count))
 }
 
 func (m *Metrics) CleanupRun(outcome string, removed int64, d time.Duration) {

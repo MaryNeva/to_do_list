@@ -26,7 +26,7 @@ const (
 type MetricsRecorder interface {
 	AuthAttempt(operation, outcome string)
 	RefreshRotation(outcome string)
-	SessionsRevoked(reason string)
+	SessionsRevoked(reason string, count int64)
 	CleanupRun(outcome string, removed int64, d time.Duration)
 }
 
@@ -34,7 +34,7 @@ type nopMetrics struct{}
 
 func (nopMetrics) AuthAttempt(string, string)              {}
 func (nopMetrics) RefreshRotation(string)                  {}
-func (nopMetrics) SessionsRevoked(string)                  {}
+func (nopMetrics) SessionsRevoked(string, int64)           {}
 func (nopMetrics) CleanupRun(string, int64, time.Duration) {}
 
 type Option func(*options)
