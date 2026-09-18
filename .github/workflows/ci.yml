@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  GO_VERSION: "1.24"
+
+jobs:
+  build:
+    name: Build and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # -mod=readonly is the whole point of this job: it fails if go.mod or
+      # go.sum would have to change to build the code, which is what a clone
+      # of this repository has to be able to do.
+      - name: Build with the checked-in module graph
+        run: go build -mod=readonly ./...
+
+      - name: go.mod and go.sum are already tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet -mod=readonly ./...
+
+      - name: Unit tests
+        run: go test -mod=readonly -race -cover ./...
+
+  integration:
+    name: Postgres integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: to_do_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/to_do_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Integration tests
+        run: go test -mod=readonly -race -tags=integration ./internal/repository/postgres/...
+
+      - name: Migrations are reversible and upgrade existing data
+        env:
+          MIGRATE_VERIFY_ADMIN_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+          DB_HOST: localhost
+          DB_PORT: "5432"
+          DB_NAME: to_do_test
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+        run: |
+          go build -tags postgres -o /tmp/migrate github.com/golang-migrate/migrate/v4/cmd/migrate
+          MIGRATE_BIN=/tmp/migrate ./scripts/migrate-verify.sh
+
+  contract:
+    name: OpenAPI contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Two different checks, and both matter: the first says the document is
+      # a valid OpenAPI 3 description, the second says the service actually
+      # answers the way the document claims.
+      - name: The document is valid OpenAPI
+        run: npx --yes @redocly/cli@latest lint docs/openapi.yaml
+
+      - name: Real responses match the document
+        run: go test -mod=readonly -count=1 ./internal/transport/httpserver/ -run TestOpenAPI
+
+  docker:
+    name: Docker image builds from a clean checkout
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Builds from the repository alone, with no local files to fall back on:
+      # this is what catches a file that works on a developer's machine only
+      # because it was never committed.
+      - name: Build the image
+        run: docker build -f deployments/Dockerfile -t to-do-list:ci .

@@ -1,0 +1,52 @@
+# Everything the image does not need. Keeping the build context small is not
+# only about speed: without this file, `.env` and the whole git history would
+# be shipped to the daemon, and an unrelated local file would invalidate the
+# build cache.
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Version control
+.git
+.gitignore
+.github
+
+# Docker and deployment inputs that are mounted, not built in
+deployments/grafana
+deployments/prometheus
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# Build artifacts and local tooling
+bin/
+tmp/
+*.exe
+go.work
+go.work.sum
+
+# Test and coverage output
+coverage.out
+coverage.html
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Local drafts and archives
+*.tgz
+*.tar.gz
+Claude outputs/
+
+# Documentation and scripts: read by people, not by the build
+README.md
+LICENSE
+docs/
+api/
+scripts/
