@@ -149,12 +149,11 @@ paths:
         - { name: order, in: query, schema: { type: string, enum: [asc, desc], default: desc } }
       responses:
         '200':
-          description: OK
+          description: One page of the caller's tasks
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/Task' }
+              schema: { $ref: '#/components/schemas/TaskPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
   /tasks/{id}:
@@ -225,12 +224,11 @@ paths:
       security: [{ bearerAuth: [] }]
       responses:
         '200':
-          description: OK
+          description: One page of users
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/User' }
+              schema: { $ref: '#/components/schemas/UserPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
@@ -389,6 +387,51 @@ components:
           schema: { $ref: '#/components/schemas/Error' }
 
   schemas:
+    Page:
+      type: object
+      description: |
+        The envelope every list endpoint returns. limit and offset echo what
+        was actually applied after clamping, which is not always what was
+        asked for: a limit above the configured maximum comes back trimmed to
+        it, so a client can page correctly without knowing the server's
+        limits in advance.
+      required: [items, total, limit, offset]
+      properties:
+        total:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Rows matching the query, ignoring limit and offset.
+        limit:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Page size actually used.
+        offset:
+          type: integer
+          format: int32
+          minimum: 0
+
+    TaskPage:
+      allOf:
+        - $ref: '#/components/schemas/Page'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/Task' }
+
+    UserPage:
+      allOf:
+        - $ref: '#/components/schemas/Page'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/User' }
+
     Health:
       type: object
       properties:
@@ -493,17 +536,6 @@ components:
         # cannot own a session; it re-authenticates with its password.
         refresh_token: { type: string }
         refresh_expires_at: { type: string, format: date-time }
-
-    Page:
-      type: object
-      description: |
-        Envelope shared by the list endpoints. total counts everything the
-        filter matches, not just the current page.
-      properties:
-        items: { type: array, items: {} }
-        total: { type: integer, example: 137 }
-        limit: { type: integer, example: 20 }
-        offset: { type: integer, example: 0 }
 
     Me:
       type: object

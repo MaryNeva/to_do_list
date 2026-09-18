@@ -201,6 +201,35 @@ func PasswordHashingCost(configPath string) (int, error) {
 	return cost, nil
 }
 
+func DatabaseURL(configPath, envPath string) (string, error) {
+	yamlValues, err := readYAML(configPath)
+	if err != nil {
+		return "", fmt.Errorf("read config %q: %w", configPath, err)
+	}
+
+	dotenvValues, err := readDotEnv(envPath)
+	if err != nil {
+		return "", fmt.Errorf("read env file %q: %w", envPath, err)
+	}
+
+	r := resolver{yaml: yamlValues, dotenv: dotenvValues}
+
+	cfg := Config{
+		DBHost:     r.str("DB_HOST", "db.host"),
+		DBPort:     r.port("DB_PORT", "db.port"),
+		DBName:     r.str("DB_NAME", "db.name"),
+		DBUser:     r.str("DB_USER", "db.user"),
+		DBPassword: r.secret("DB_PASSWORD"),
+		DBSSLMode:  r.str("DB_SSLMODE", "db.sslmode"),
+	}
+
+	if err := r.err(configPath); err != nil {
+		return "", err
+	}
+
+	return cfg.DatabaseDSN(), nil
+}
+
 type resolver struct {
 	yaml     map[string]string
 	dotenv   map[string]string

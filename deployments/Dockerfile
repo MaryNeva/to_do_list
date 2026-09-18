@@ -3,13 +3,19 @@
 FROM golang:1.24-alpine AS build
 WORKDIR /src
 
-# go.sum* matches zero or one file, so this works whether or not go.sum has
-# been generated yet. `go mod tidy` fills in/verifies go.sum against go.mod
-# and the actual source, then the module cache is reused by `go build`
-# below as long as go.mod/go.sum don't change on a later build.
-COPY go.mod go.sum* ./
-COPY . .
-RUN go mod tidy && go mod download
+# Dependencies first, in their own layer: this step only re-runs when
+# go.mod/go.sum change, so editing source code does not re-download the module
+# graph. `go mod tidy` is deliberately NOT run here - the image must build
+# exactly what the repository pins, and tidying inside the build would quietly
+# repair a go.mod/go.sum that is broken for everyone else.
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Only what the binary needs. Anything else that lands in the build context is
+# excluded by .dockerignore, but listing the inputs explicitly keeps the cache
+# from being invalidated by unrelated files.
+COPY cmd ./cmd
+COPY internal ./internal
 
 # Stamped into the binary and exposed as todo_build_info and GET /healthz, so
 # a running instance can say which revision it is.
@@ -17,7 +23,9 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
 
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+# -mod=readonly fails the build if go.mod or go.sum would have to change,
+# rather than changing them.
+RUN CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath \
     -ldflags="-s -w \
       -X to-do-list/internal/buildinfo.version=${VERSION} \
       -X to-do-list/internal/buildinfo.commit=${COMMIT} \

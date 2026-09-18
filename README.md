@@ -69,6 +69,8 @@ the security and correctness choices behind the auth and ownership checks.
 cmd/
   server/     entry point: config -> logger -> DB -> use cases -> HTTP server -> graceful shutdown
   hashpw/     CLI to bcrypt-hash a password for ADMIN_PASSWORD_HASH
+  dsn/        prints the database URL the service would use, so tooling
+              (the migration targets) connects exactly the way it does
 
 internal/
   domain/         entities + repository/service interfaces (no framework imports)
@@ -96,6 +98,10 @@ config.yaml       non-secret settings, safe to commit (see Configuration below)
 docker-compose.yml  Postgres + the app; Prometheus + Grafana behind the
                     "observability" profile
 migrations/       golang-migrate SQL migrations
+.github/workflows/ci.yml  build with -mod=readonly, tests, OpenAPI lint,
+                  contract test, migration check, Docker build from a clean
+                  checkout
+.dockerignore     keeps .env, .git and local drafts out of the build context
 deployments/      Dockerfile, Prometheus scrape config, provisioned Grafana
                   datasource and dashboard
 scripts/          smoke-test.sh: end-to-end check against the running stack
@@ -361,9 +367,31 @@ Leave both variables empty (the default) to disable this entirely.
 ## Testing
 
 ```bash
+make verify             # build, vet and test with -mod=readonly: proves a clone can build
 make test               # unit tests: use cases, JWT, passwords, handlers, middleware, config
 make test-integration   # needs a real Postgres reachable at TEST_DATABASE_URL
+make test-contract      # real HTTP responses checked against docs/openapi.yaml
+make migrate-verify     # up -> down -> up, and an upgrade over existing rows
+make smoke-test         # the whole stack through the real HTTP API
 ```
+
+`make verify` is the one to run before pushing. It builds with `-mod=readonly`,
+so it fails if `go.mod` or `go.sum` would have to change - which is exactly
+what a fresh clone cannot do for itself. The same check runs in CI, next to a
+`go mod tidy` that must produce no diff.
+
+The contract test (`internal/transport/httpserver/openapi_test.go`) starts the
+assembled application, calls every endpoint and validates each response
+against the schema in `docs/openapi.yaml`, including rejecting fields the
+document does not describe. It is what stops the specification drifting away
+from the service - the list endpoints were once documented as bare arrays
+while the handlers returned a page envelope, and a generated client would
+have been wrong on both.
+
+`make migrate-verify` creates a throwaway database, migrates it up, rolls it
+all the way back, migrates up again and compares the schema, then rolls back
+one step, writes rows the way an older release would have, and migrates
+forward over them to check nothing is lost and new columns are backfilled.
 
 Unit tests use hand-written in-memory fakes (see `fakeTaskRepo`,
 `fakeUserRepo`, `fakeTokenService`, `fakeAuthValidator`, ...) rather than a
