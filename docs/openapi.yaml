@@ -40,6 +40,11 @@ paths:
     post:
       tags: [auth]
       summary: Exchange credentials for a JWT access token
+      description: |
+        Answers 401 for an unknown user or a wrong password, and also when the
+        password is changed while this login is in flight: the session would
+        otherwise be opened behind the revocation that the password change ran.
+        The client should retry with the new password.
       requestBody:
         required: true
         content:

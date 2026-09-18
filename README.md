@@ -20,9 +20,9 @@ the security and correctness choices behind the auth and ownership checks.
   user, so a token can be spent at most once even if several requests present
   it at the same moment, and a failed rotation leaves the old token usable.
 - Changing a password ends every refresh session of that account in the same
-  transaction as the password write, so a session opened with the old
-  password cannot outlive it - see "Session lifetime" below for what that
-  does and does not invalidate.
+  transaction as the password write, and a `credentials_version` counter stops
+  a login that verified the old password from storing its session afterwards -
+  see "Session lifetime" below for what that does and does not invalidate.
 - Expired refresh tokens are swept by a background janitor that stops with
   the server; rows are kept for a retention period after they lapse so a
   replayed token is still recognisable as reuse rather than as unknown.
@@ -297,6 +297,50 @@ one is rejected rather than treated as eternal), and the identity has to make
 sense - a regular account needs a positive user id, and id 0 is reserved for
 the bootstrap admin.
 
+#### A login that races a password change
+
+"A password change ends every session" has an awkward edge: a login that has
+already read and verified the *old* hash, but has not yet stored its session,
+would otherwise slip its session in after the revocation had run - and the
+revocation cannot retroactively touch a row that did not exist when it ran.
+
+The fix is a counter, `users.credentials_version`, bumped whenever the
+password is written. A login carries the version it verified against, and the
+session is only stored while that version is still current:
+
+```
+login                              password change
+-----                              ---------------
+read hash + version v                        |
+verify password                              |
+                                   write new hash, version -> v+1
+                                   revoke every existing session
+store session (expects v) ---------> refused: version is v+1
+```
+
+The check runs inside the insert's transaction, under a shared lock on the
+user row that a password change takes exclusively, so the two cannot overlap
+and read stale values of each other. A refused login answers `401`, the same
+as a wrong password: from the client's point of view the credentials it used
+are no longer valid, which is exactly true.
+
+#### If the response to a refresh is lost
+
+Rotation is atomic, but atomicity stops at the process boundary. If the
+client never receives the reply - connection reset, timeout, a proxy giving
+up - the exchange still happened: the old token is consumed and a new one
+exists that the client does not have. Retrying with the old token is then
+indistinguishable from a replay, and is treated as one: every session of that
+account is ended and the user has to log in again.
+
+No transaction can fix this, because the problem is that the result never
+arrived. Making it invisible needs either an idempotency key the client
+repeats on a retry (so the server can return the same pair twice) or a short
+grace window in which the immediately preceding token is still accepted from
+the same client. Both trade away some of the reuse detection this service is
+built around, so neither is implemented here; the deliberate choice is to
+fail safe and make the client log in again.
+
 ### Superadmin / bootstrap admin login
 
 Before any real user exists, you can log in as an operator-configured
@@ -358,7 +402,7 @@ request*.
 | `todo_http_requests_in_flight` | gauge | - | Whether requests are queueing |
 | `todo_auth_attempts_total` | counter | `operation`, `outcome` | Failed-login rate, registration conflicts |
 | `todo_auth_refresh_rotations_total` | counter | `outcome` | Token exchanges, and replays of consumed tokens |
-| `todo_auth_sessions_revoked_total` | counter | `reason` | Logouts, password changes, reuse-triggered revocations |
+| `todo_auth_sessions_revoked_total` | counter | `reason` | Logouts, password changes, reuse-triggered revocations. Counts sessions actually ended, so one replay that kills three sessions moves it by three, and a revocation that failed moves it not at all |
 | `todo_cleanup_runs_total` | counter | `outcome` | Whether the janitor is running and succeeding |
 | `todo_cleanup_refresh_tokens_removed_total` | counter | - | How much it deletes |
 | `todo_cleanup_duration_seconds` | histogram | - | How long a sweep takes |
@@ -425,12 +469,21 @@ The same identifier is returned in the `X-Request-Id` header and in the
 `request_id` field of every error response, so a user can quote it from a
 failed request and it can be found in the logs.
 
-One subtlety worth knowing if you extend this: Fiber runs the error handler
+Two subtleties worth knowing if you extend this. Fiber runs the error handler
 *after* every middleware has returned, so at the moment the access-log and
 metrics middleware run, the response still says `200`. Both derive the real
-code from the error through one shared function
-(`httpapi.StatusFor`), which is also what the error handler uses - otherwise
-every 404 would be logged and counted as a success.
+code from the error through one shared function (`httpapi.StatusFor`), which
+is also what the error handler uses - otherwise every 404 would be logged and
+counted as a success.
+
+And the middleware order is deliberate: `recover` is mounted *inside* the
+metrics and logging middleware, not outside them. A panic unwinds the stack of
+everything it passes through, so anything mounted outside `recover` never runs
+its post-`c.Next()` code - the request would vanish from both the metrics and
+the access log while the client still got a `500`. With `recover` inside, the
+panic reaches them as an ordinary error and is counted and logged like any
+other 500 (`TestApp_PanicIsAccountedAsA500` pins this on the fully assembled
+app).
 
 ### Prometheus and Grafana
 
