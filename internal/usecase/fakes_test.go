@@ -18,17 +18,26 @@ type fakeRefreshRepo struct {
 	tokens map[string]domain.RefreshToken
 	nextID int64
 
-	rotateErr  error
-	failInsert bool
+	rotateErr    error
+	revokeAllErr error
+	failInsert   bool
+
+	lookupUsername            func(userID int64) string
+	currentCredentialsVersion func(userID int64) int64
 }
 
 func newFakeRefreshRepo() *fakeRefreshRepo {
 	return &fakeRefreshRepo{tokens: make(map[string]domain.RefreshToken), nextID: 1}
 }
 
-func (f *fakeRefreshRepo) Create(_ context.Context, token domain.RefreshToken) (domain.RefreshToken, error) {
+func (f *fakeRefreshRepo) Create(_ context.Context, token domain.RefreshToken, credentialsVersion int64) (domain.RefreshToken, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if f.currentCredentialsVersion != nil && f.currentCredentialsVersion(token.UserID) != credentialsVersion {
+		return domain.RefreshToken{}, apperr.ErrConflict
+	}
+
 	if _, exists := f.tokens[token.TokenHash]; exists {
 		return domain.RefreshToken{}, apperr.ErrConflict
 	}
@@ -53,10 +62,11 @@ func (f *fakeRefreshRepo) Rotate(
 	_ context.Context,
 	presentedHash string,
 	replacement domain.RefreshToken,
-	now time.Time,
 ) (domain.RotateResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	now := time.Now()
 
 	if f.rotateErr != nil {
 		return domain.RotateResult{}, f.rotateErr
@@ -67,10 +77,11 @@ func (f *fakeRefreshRepo) Rotate(
 		return domain.RotateResult{}, apperr.ErrNotFound
 	}
 	if presented.RevokedAt != nil {
-		return domain.RotateResult{UserID: presented.UserID}, apperr.ErrConflict
+		return domain.RotateResult{UserID: presented.UserID, Username: f.usernameOf(presented.UserID)}, apperr.ErrConflict
 	}
 	if !now.Before(presented.ExpiresAt) {
-		return domain.RotateResult{UserID: presented.UserID}, fmt.Errorf("%w: refresh token expired", apperr.ErrUnauthorized)
+		return domain.RotateResult{UserID: presented.UserID, Username: f.usernameOf(presented.UserID)},
+			fmt.Errorf("%w: refresh token expired", apperr.ErrUnauthorized)
 	}
 
 	if f.failInsert {
@@ -87,7 +98,31 @@ func (f *fakeRefreshRepo) Rotate(
 	replacement.CreatedAt = now
 	f.tokens[replacement.TokenHash] = replacement
 
-	return domain.RotateResult{Issued: replacement, UserID: presented.UserID}, nil
+	return domain.RotateResult{
+		Issued:   replacement,
+		UserID:   presented.UserID,
+		Username: f.usernameOf(presented.UserID),
+	}, nil
+}
+
+func (f *fakeRefreshRepo) liveSessionsOf(userID int64) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	live := 0
+	for _, token := range f.tokens {
+		if token.UserID == userID && token.RevokedAt == nil {
+			live++
+		}
+	}
+	return live
+}
+
+func (f *fakeRefreshRepo) usernameOf(userID int64) string {
+	if f.lookupUsername == nil {
+		return ""
+	}
+	return f.lookupUsername(userID)
 }
 
 func (f *fakeRefreshRepo) Revoke(_ context.Context, hash string) error {
@@ -103,17 +138,24 @@ func (f *fakeRefreshRepo) Revoke(_ context.Context, hash string) error {
 	return nil
 }
 
-func (f *fakeRefreshRepo) RevokeAllForUser(_ context.Context, userID int64) error {
+func (f *fakeRefreshRepo) RevokeAllForUser(_ context.Context, userID int64) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if f.revokeAllErr != nil {
+		return 0, f.revokeAllErr
+	}
+
 	now := time.Now()
+	var revoked int64
 	for hash, token := range f.tokens {
 		if token.UserID == userID && token.RevokedAt == nil {
 			token.RevokedAt = &now
 			f.tokens[hash] = token
+			revoked++
 		}
 	}
-	return nil
+	return revoked, nil
 }
 
 func (f *fakeRefreshRepo) DeleteExpired(_ context.Context, before time.Time) (int64, error) {

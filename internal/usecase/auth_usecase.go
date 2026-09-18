@@ -177,22 +177,23 @@ func (a *AuthUseCase) Refresh(ctx context.Context, refreshToken string) (domain.
 		return domain.Tokens{}, fmt.Errorf("generate refresh token: %w", err)
 	}
 
-	now := time.Now()
-	expiresAt := now.Add(a.cfg.RefreshTTL)
+	expiresAt := time.Now().Add(a.cfg.RefreshTTL)
 
 	result, err := a.refresh.Rotate(ctx, a.issuer.HashRefreshToken(refreshToken), domain.RefreshToken{
 		TokenHash: hash,
 		ExpiresAt: expiresAt,
-	}, now)
+	})
 	switch {
 	case err == nil:
 		a.metrics.RefreshRotation(OutcomeSuccess)
 	case errors.Is(err, apperr.ErrConflict):
 		a.metrics.RefreshRotation(OutcomeReuse)
-		a.metrics.SessionsRevoked(ReasonTokenReuse)
 
-		if revokeErr := a.refresh.RevokeAllForUser(ctx, result.UserID); revokeErr != nil {
+		revoked, revokeErr := a.refresh.RevokeAllForUser(ctx, result.UserID)
+		if revokeErr != nil {
 			a.logger.ErrorContext(ctx, "revoking sessions after refresh token reuse failed", "error", revokeErr, "user_id", result.UserID)
+		} else {
+			a.metrics.SessionsRevoked(ReasonTokenReuse, revoked)
 		}
 		a.logger.WarnContext(ctx, "refresh token reused after it was consumed", "user_id", result.UserID)
 		return domain.Tokens{}, fmt.Errorf("%w: refresh token is no longer valid", apperr.ErrUnauthorized)
@@ -207,15 +208,7 @@ func (a *AuthUseCase) Refresh(ctx context.Context, refreshToken string) (domain.
 		return domain.Tokens{}, fmt.Errorf("rotate refresh token: %w", err)
 	}
 
-	user, err := a.users.GetByID(ctx, result.UserID)
-	if err != nil {
-		if errors.Is(err, apperr.ErrNotFound) {
-			return domain.Tokens{}, fmt.Errorf("%w: account no longer exists", apperr.ErrUnauthorized)
-		}
-		return domain.Tokens{}, fmt.Errorf("get user: %w", err)
-	}
-
-	access, accessExpiresAt, err := a.tokens.Generate(user.ID, user.Username, false)
+	access, accessExpiresAt, err := a.tokens.Generate(result.UserID, result.Username, false)
 	if err != nil {
 		return domain.Tokens{}, fmt.Errorf("generate token: %w", err)
 	}
@@ -240,7 +233,7 @@ func (a *AuthUseCase) Logout(ctx context.Context, refreshToken string) error {
 	err := a.refresh.Revoke(ctx, a.issuer.HashRefreshToken(refreshToken))
 	switch {
 	case err == nil:
-		a.metrics.SessionsRevoked(ReasonLogout)
+		a.metrics.SessionsRevoked(ReasonLogout, 1)
 		return nil
 	case errors.Is(err, apperr.ErrNotFound):
 		return nil
@@ -265,7 +258,12 @@ func (a *AuthUseCase) issueTokens(ctx context.Context, user domain.User) (domain
 		UserID:    user.ID,
 		TokenHash: hash,
 		ExpiresAt: refreshExpiresAt,
-	}); err != nil {
+	}, user.CredentialsVersion); err != nil {
+		if errors.Is(err, apperr.ErrConflict) {
+			return domain.Tokens{}, fmt.Errorf(
+				"%w: the password changed while this login was in progress",
+				apperr.ErrInvalidCredentials)
+		}
 		return domain.Tokens{}, fmt.Errorf("store refresh token: %w", err)
 	}
 

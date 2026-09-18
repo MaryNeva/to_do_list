@@ -56,7 +56,6 @@ func New(
 		WriteTimeout: cfg.WriteTimeout,
 	})
 
-	app.Use(recover.New())
 	app.Use(requestid.New())
 	app.Use(appmiddleware.RequestContext())
 
@@ -64,12 +63,13 @@ func New(
 		app.Use(appmiddleware.Metrics(obs.Requests, cfg.MetricsPath))
 	}
 
+	app.Use(appmiddleware.RequestLogger(logger))
+	app.Use(recover.New())
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: cfg.CORSAllowOrigins,
 		AllowHeaders: cfg.CORSAllowHeaders,
 		AllowMethods: cfg.CORSAllowMethods,
 	}))
-	app.Use(appmiddleware.RequestLogger(logger))
 	app.Use(func(c *fiber.Ctx) error {
 		c.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
 		return c.Next()

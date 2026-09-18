@@ -87,8 +87,8 @@ func TestSessionCleaner_KeepsRowsNeededForReuseDetection(t *testing.T) {
 
 	justExpired := domain.RefreshToken{UserID: 1, TokenHash: "recent", ExpiresAt: time.Now().Add(-time.Minute)}
 	longGone := domain.RefreshToken{UserID: 1, TokenHash: "ancient", ExpiresAt: time.Now().Add(-2 * retention)}
-	repo.Create(context.Background(), justExpired)
-	repo.Create(context.Background(), longGone)
+	repo.Create(context.Background(), justExpired, 0)
+	repo.Create(context.Background(), longGone, 0)
 
 	removed, err := cleaner.CleanupOnce(context.Background())
 	if err != nil {

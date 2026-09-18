@@ -15,8 +15,6 @@ import (
 	"to-do-list/internal/domain"
 )
 
-// fakeTokenService avoids depending on real JWT/crypto code in usecase-level
-// tests; internal/auth/token has its own dedicated test suite for that.
 type fakeTokenService struct {
 	generateErr error
 }
@@ -52,6 +50,10 @@ func newAuthUseCaseWithRefresh(t *testing.T, adminUsername, adminPasswordHash st
 		MinPasswordLength: 8,
 		RefreshTTL:        720 * time.Hour,
 	}
+
+	refresh.lookupUsername = func(id int64) string { return repo.users[id].Username }
+	refresh.currentCredentialsVersion = func(id int64) int64 { return repo.users[id].CredentialsVersion }
+
 	uc := NewAuthUseCase(repo, tokens, refresh, &fakeIssuer{}, testHasher(t), cfg, silentLogger(), opts...)
 	return uc, repo, tokens, refresh
 }
@@ -401,7 +403,7 @@ func TestAuthUseCase_Refresh_ExpiredTokenRejected(t *testing.T) {
 		UserID:    user.ID,
 		TokenHash: tokenHash,
 		ExpiresAt: time.Now().Add(-time.Minute),
-	})
+	}, user.CredentialsVersion)
 
 	if _, err := uc.Refresh(context.Background(), plain); !errors.Is(err, apperr.ErrUnauthorized) {
 		t.Errorf("an expired refresh token error = %v, want apperr.ErrUnauthorized", err)
@@ -511,5 +513,95 @@ func TestAuthUseCase_Refresh_OnlyOneConcurrentCallerWins(t *testing.T) {
 	}
 	if won != 1 {
 		t.Errorf("%d callers exchanged the same token, want exactly 1", won)
+	}
+}
+
+func TestAuthUseCase_Login_RefusesASessionForSupersededCredentials(t *testing.T) {
+	uc, _, _, refresh := newAuthUseCaseWithRefresh(t, "", "")
+	ctx := context.Background()
+
+	created, err := uc.Register(ctx, "mary", "mary@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register() unexpected error: %v", err)
+	}
+
+	// The account's credentials move on while this login is in flight.
+	refresh.currentCredentialsVersion = func(int64) int64 {
+		return created.CredentialsVersion + 1
+	}
+
+	_, _, err = uc.Login(ctx, "mary", "password123")
+	if !errors.Is(err, apperr.ErrInvalidCredentials) {
+		t.Fatalf("Login() error = %v, want apperr.ErrInvalidCredentials", err)
+	}
+
+	if sessions := refresh.liveSessionsOf(created.ID); sessions != 0 {
+		t.Errorf("the refused login left %d sessions behind, want 0", sessions)
+	}
+}
+
+func TestAuthUseCase_Login_StoresASessionWhileTheCredentialsStillMatch(t *testing.T) {
+	uc, _, _, refresh := newAuthUseCaseWithRefresh(t, "", "")
+	ctx := context.Background()
+
+	created, err := uc.Register(ctx, "mary", "mary@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register() unexpected error: %v", err)
+	}
+
+	refresh.currentCredentialsVersion = func(int64) int64 { return created.CredentialsVersion }
+
+	if _, _, err := uc.Login(ctx, "mary", "password123"); err != nil {
+		t.Fatalf("Login() unexpected error: %v", err)
+	}
+	if sessions := refresh.liveSessionsOf(created.ID); sessions != 1 {
+		t.Errorf("live sessions = %d, want 1", sessions)
+	}
+}
+
+func TestAuthUseCase_Refresh_SucceedsEvenIfTheUserCannotBeReadAfterwards(t *testing.T) {
+	uc, users, _, _ := newAuthUseCaseWithRefresh(t, "", "")
+	ctx := context.Background()
+
+	if _, err := uc.Register(ctx, "mary", "mary@example.com", "password123"); err != nil {
+		t.Fatalf("Register() unexpected error: %v", err)
+	}
+	tokens, _, err := uc.Login(ctx, "mary", "password123")
+	if err != nil {
+		t.Fatalf("Login() unexpected error: %v", err)
+	}
+
+	users.getByIDErr = errors.New("connection reset")
+
+	refreshed, err := uc.Refresh(ctx, tokens.RefreshToken)
+	if err != nil {
+		t.Fatalf("Refresh() failed because of a read it should no longer make: %v", err)
+	}
+	if refreshed.RefreshToken == "" || refreshed.AccessToken == "" {
+		t.Error("Refresh() returned an incomplete token pair")
+	}
+}
+
+func TestAuthUseCase_Refresh_AccessTokenKeepsTheUsername(t *testing.T) {
+	uc, _, _, _ := newAuthUseCaseWithRefresh(t, "", "")
+	ctx := context.Background()
+
+	if _, err := uc.Register(ctx, "mary", "mary@example.com", "password123"); err != nil {
+		t.Fatalf("Register() unexpected error: %v", err)
+	}
+	tokens, user, err := uc.Login(ctx, "mary", "password123")
+	if err != nil {
+		t.Fatalf("Login() unexpected error: %v", err)
+	}
+
+	refreshed, err := uc.Refresh(ctx, tokens.RefreshToken)
+	if err != nil {
+		t.Fatalf("Refresh() unexpected error: %v", err)
+	}
+
+	// fakeTokenService encodes its inputs into the token string.
+	want := fmt.Sprintf("token-for-%d-%s-admin:false", user.ID, user.Username)
+	if refreshed.AccessToken != want {
+		t.Errorf("access token = %q, want %q", refreshed.AccessToken, want)
 	}
 }

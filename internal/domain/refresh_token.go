@@ -19,17 +19,16 @@ func (t RefreshToken) IsUsable(now time.Time) bool {
 }
 
 type RotateResult struct {
-	Issued RefreshToken
-	UserID int64
+	Issued   RefreshToken
+	UserID   int64
+	Username string
 }
 
 type RefreshTokenRepository interface {
-	Create(ctx context.Context, token RefreshToken) (RefreshToken, error)
+	Create(ctx context.Context, token RefreshToken, credentialsVersion int64) (RefreshToken, error)
 	GetByHash(ctx context.Context, hash string) (RefreshToken, error)
-
-	Rotate(ctx context.Context, presentedHash string, replacement RefreshToken, now time.Time) (RotateResult, error)
-
+	Rotate(ctx context.Context, presentedHash string, replacement RefreshToken) (RotateResult, error)
 	Revoke(ctx context.Context, hash string) error
-	RevokeAllForUser(ctx context.Context, userID int64) error
+	RevokeAllForUser(ctx context.Context, userID int64) (int64, error)
 	DeleteExpired(ctx context.Context, before time.Time) (int64, error)
 }
