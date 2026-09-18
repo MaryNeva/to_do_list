@@ -146,8 +146,6 @@ func TestConcurrentRefresh_OnlyOneCallerConsumesTheToken(t *testing.T) {
 		t.Fatalf("%d callers exchanged the same refresh token, want exactly 1", won)
 	}
 
-	// The losers are treated as a replay, which ends every session of the
-	// account - including the one the winner had just been issued.
 	if active := f.activeSessions(t); active != 0 {
 		t.Errorf("%d sessions are still active after a detected replay, want 0", active)
 	}

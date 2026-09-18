@@ -68,6 +68,10 @@ type Config struct {
 
 	LogLevel  string
 	LogFormat string
+
+	MetricsEnabled   bool
+	MetricsPath      string
+	MetricsNamespace string
 }
 
 const (
@@ -76,7 +80,6 @@ const (
 	maxBcryptPasswordLength = 72
 )
 
-// Load resolves configuration using the default file locations.
 func Load() (Config, error) {
 	return LoadFrom(DefaultConfigPath, DefaultEnvPath)
 }
@@ -153,6 +156,10 @@ func LoadFrom(configPath, envPath string) (Config, error) {
 
 		LogLevel:  r.str("LOG_LEVEL", "log.level"),
 		LogFormat: r.str("LOG_FORMAT", "log.format"),
+
+		MetricsEnabled:   r.boolean("METRICS_ENABLED", "observability.metrics_enabled"),
+		MetricsPath:      r.str("METRICS_PATH", "observability.metrics_path"),
+		MetricsNamespace: r.str("METRICS_NAMESPACE", "observability.metrics_namespace"),
 	}
 
 	if err := r.err(configPath); err != nil {
@@ -474,6 +481,27 @@ func (c Config) validate() error {
 		)
 	}
 
+	if !strings.HasPrefix(c.MetricsPath, "/") {
+		problems = append(
+			problems,
+			fmt.Sprintf(
+				"observability.metrics_path (%q) must start with a slash",
+				c.MetricsPath,
+			),
+		)
+	}
+
+	if !isPrometheusName(c.MetricsNamespace) {
+		problems = append(
+			problems,
+			fmt.Sprintf(
+				"observability.metrics_namespace (%q) must match [a-zA-Z_][a-zA-Z0-9_]* - "+
+					"it is prefixed to every metric name",
+				c.MetricsNamespace,
+			),
+		)
+	}
+
 	if c.UsernameMinLength > c.UsernameMaxLength {
 		problems = append(
 			problems,
@@ -494,6 +522,23 @@ func (c Config) validate() error {
 	}
 
 	return nil
+}
+
+func isPrometheusName(s string) bool {
+	if s == "" {
+		return false
+	}
+
+	for i, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '_':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+
+	return true
 }
 
 func (c Config) DatabaseDSN() string {

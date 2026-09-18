@@ -66,6 +66,11 @@ cors:
 health:
   ready_timeout: 2s
 
+observability:
+  metrics_enabled: true
+  metrics_path: /metrics
+  metrics_namespace: todo
+
 log:
   level: info
   format: json
@@ -145,6 +150,9 @@ func TestLoadFrom_ReadsEverySettingFromYAML(t *testing.T) {
 		{"MigrationsPath", cfg.MigrationsPath, "migrations"},
 		{"LogLevel", cfg.LogLevel, "info"},
 		{"LogFormat", cfg.LogFormat, "json"},
+		{"MetricsEnabled", cfg.MetricsEnabled, true},
+		{"MetricsPath", cfg.MetricsPath, "/metrics"},
+		{"MetricsNamespace", cfg.MetricsNamespace, "todo"},
 	}
 
 	for _, c := range checks {
@@ -647,5 +655,53 @@ func TestLoadFrom_RejectsRefreshTTLShorterThanAccessTTL(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "jwt.refresh_ttl") {
 		t.Errorf("error should name the key, got: %v", err)
+	}
+}
+
+func TestLoadFrom_RejectsUnusableMetricsSettings(t *testing.T) {
+	cases := []struct {
+		name string
+		from string
+		to   string
+		key  string
+	}{
+		{
+			name: "path without a leading slash",
+			from: "  metrics_path: /metrics",
+			to:   "  metrics_path: metrics",
+			key:  "observability.metrics_path",
+		},
+		{
+			name: "namespace with a dash",
+			from: "  metrics_namespace: todo",
+			to:   "  metrics_namespace: to-do",
+			key:  "observability.metrics_namespace",
+		},
+		{
+			name: "namespace starting with a digit",
+			from: "  metrics_namespace: todo",
+			to:   "  metrics_namespace: 1todo",
+			key:  "observability.metrics_namespace",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setSecrets(t)
+
+			yaml := strings.Replace(completeYAML, tc.from, tc.to, 1)
+			if yaml == completeYAML {
+				t.Fatalf("fixture does not contain %q", tc.from)
+			}
+			configPath, envPath := writeConfig(t, yaml)
+
+			_, err := LoadFrom(configPath, envPath)
+			if err == nil {
+				t.Fatal("the setting should be rejected")
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("error should name %s, got: %v", tc.key, err)
+			}
+		})
 	}
 }

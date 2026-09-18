@@ -25,14 +25,16 @@ type UserConfig struct {
 }
 
 type UserUseCase struct {
-	repo   domain.UserRepository
-	hasher *password.Hasher
-	cfg    UserConfig
-	logger *slog.Logger
+	repo    domain.UserRepository
+	hasher  *password.Hasher
+	cfg     UserConfig
+	logger  *slog.Logger
+	metrics MetricsRecorder
 }
 
-func NewUserUseCase(repo domain.UserRepository, hasher *password.Hasher, cfg UserConfig, logger *slog.Logger) *UserUseCase {
-	return &UserUseCase{repo: repo, hasher: hasher, cfg: cfg, logger: logger}
+func NewUserUseCase(repo domain.UserRepository, hasher *password.Hasher, cfg UserConfig, logger *slog.Logger, opts ...Option) *UserUseCase {
+	resolved := applyOptions(opts)
+	return &UserUseCase{repo: repo, hasher: hasher, cfg: cfg, logger: logger, metrics: resolved.metrics}
 }
 
 var _ domain.UserService = (*UserUseCase)(nil)
@@ -98,6 +100,10 @@ func (uc *UserUseCase) Update(ctx context.Context, id int64, username, email, ne
 		}
 		uc.logger.ErrorContext(ctx, "update user failed", "error", err, "user_id", id)
 		return domain.User{}, fmt.Errorf("update user: %w", err)
+	}
+
+	if fields.PasswordHash != nil {
+		uc.metrics.SessionsRevoked(ReasonPasswordChange)
 	}
 
 	return updated, nil

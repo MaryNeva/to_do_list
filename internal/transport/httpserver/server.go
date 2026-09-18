@@ -2,14 +2,17 @@ package httpserver
 
 import (
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/adaptor"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/fiber/v2/middleware/requestid"
 
+	"to-do-list/internal/buildinfo"
 	"to-do-list/internal/domain"
 	httpapi "to-do-list/internal/transport/http"
 	"to-do-list/internal/transport/http/handler"
@@ -25,11 +28,27 @@ type Config struct {
 	CORSAllowHeaders         string
 	RateLimitAuthMaxRequests int
 	RateLimitAuthWindow      time.Duration
-	// HealthReadyTimeout budgets the database ping behind GET /readyz.
+	// HealthReadyTimeout budgets each dependency probe behind GET /readyz.
 	HealthReadyTimeout time.Duration
+	MetricsEnabled     bool
+	MetricsPath        string
 }
 
-func New(cfg Config, logger *slog.Logger, authSvc domain.AuthService, taskSvc domain.TaskService, userSvc domain.UserService, dbPing httpapi.Pinger) *fiber.App {
+type Observability struct {
+	Requests appmiddleware.RequestRecorder
+	Exporter http.Handler
+	Build    buildinfo.Info
+}
+
+func New(
+	cfg Config,
+	logger *slog.Logger,
+	obs Observability,
+	authSvc domain.AuthService,
+	taskSvc domain.TaskService,
+	userSvc domain.UserService,
+	checks ...httpapi.Check,
+) *fiber.App {
 	app := fiber.New(fiber.Config{
 		AppName:      cfg.AppName,
 		ErrorHandler: httpapi.NewErrorHandler(logger),
@@ -39,6 +58,12 @@ func New(cfg Config, logger *slog.Logger, authSvc domain.AuthService, taskSvc do
 
 	app.Use(recover.New())
 	app.Use(requestid.New())
+	app.Use(appmiddleware.RequestContext())
+
+	if obs.Requests != nil {
+		app.Use(appmiddleware.Metrics(obs.Requests, cfg.MetricsPath))
+	}
+
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: cfg.CORSAllowOrigins,
 		AllowHeaders: cfg.CORSAllowHeaders,
@@ -50,8 +75,12 @@ func New(cfg Config, logger *slog.Logger, authSvc domain.AuthService, taskSvc do
 		return c.Next()
 	})
 
-	app.Get("/healthz", httpapi.HealthHandler())
-	app.Get("/readyz", httpapi.ReadyHandler(dbPing, cfg.HealthReadyTimeout))
+	app.Get("/healthz", httpapi.HealthHandler(obs.Build))
+	app.Get("/readyz", httpapi.ReadyHandler(cfg.HealthReadyTimeout, checks...))
+
+	if cfg.MetricsEnabled && obs.Exporter != nil {
+		app.Get(cfg.MetricsPath, adaptor.HTTPHandler(obs.Exporter))
+	}
 
 	authMiddleware := appmiddleware.Auth(authSvc)
 

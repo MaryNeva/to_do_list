@@ -12,42 +12,52 @@ import (
 	"to-do-list/internal/apperr"
 )
 
+func StatusFor(err error) int {
+	if err == nil {
+		return fiber.StatusOK
+	}
+
+	var fiberErr *fiber.Error
+	if errors.As(err, &fiberErr) {
+		return fiberErr.Code
+	}
+
+	var validationErrs validator.ValidationErrors
+	if errors.As(err, &validationErrs) {
+		return fiber.StatusBadRequest
+	}
+
+	switch {
+	case errors.Is(err, apperr.ErrNotFound):
+		return fiber.StatusNotFound
+	case errors.Is(err, apperr.ErrConflict):
+		return fiber.StatusConflict
+	case errors.Is(err, apperr.ErrValidation):
+		return fiber.StatusBadRequest
+	case errors.Is(err, apperr.ErrInvalidCredentials), errors.Is(err, apperr.ErrUnauthorized):
+		return fiber.StatusUnauthorized
+	case errors.Is(err, apperr.ErrForbidden):
+		return fiber.StatusForbidden
+	default:
+		return fiber.StatusInternalServerError
+	}
+}
+
 func NewErrorHandler(logger *slog.Logger) fiber.ErrorHandler {
 	return func(c *fiber.Ctx, err error) error {
 		requestID := c.GetRespHeader(fiber.HeaderXRequestID)
+		status := StatusFor(err)
 
-		var fiberErr *fiber.Error
-		if errors.As(err, &fiberErr) {
-			return JSON(c, fiberErr.Code, errorResponse{Error: fiberErr.Message, RequestID: requestID})
-		}
-
-		var validationErrs validator.ValidationErrors
-		if errors.As(err, &validationErrs) {
-			return JSON(c, fiber.StatusBadRequest, errorResponse{
-				Error:     formatValidationErrors(validationErrs),
+		if status != fiber.StatusInternalServerError {
+			return JSON(c, status, errorResponse{
+				Error:     clientMessage(err),
 				RequestID: requestID,
 			})
 		}
 
-		switch {
-		case errors.Is(err, apperr.ErrNotFound):
-			return JSON(c, fiber.StatusNotFound, errorResponse{Error: err.Error(), RequestID: requestID})
-		case errors.Is(err, apperr.ErrConflict):
-			return JSON(c, fiber.StatusConflict, errorResponse{Error: err.Error(), RequestID: requestID})
-		case errors.Is(err, apperr.ErrValidation):
-			return JSON(c, fiber.StatusBadRequest, errorResponse{Error: err.Error(), RequestID: requestID})
-		case errors.Is(err, apperr.ErrInvalidCredentials):
-			return JSON(c, fiber.StatusUnauthorized, errorResponse{Error: err.Error(), RequestID: requestID})
-		case errors.Is(err, apperr.ErrUnauthorized):
-			return JSON(c, fiber.StatusUnauthorized, errorResponse{Error: err.Error(), RequestID: requestID})
-		case errors.Is(err, apperr.ErrForbidden):
-			return JSON(c, fiber.StatusForbidden, errorResponse{Error: err.Error(), RequestID: requestID})
-		}
-
-		logger.LogAttrs(c.Context(), slog.LevelError, "unhandled request error",
+		logger.LogAttrs(c.UserContext(), slog.LevelError, "unhandled request error",
 			slog.String("method", c.Method()),
 			slog.String("path", c.Path()),
-			slog.String("request_id", requestID),
 			slog.String("error", err.Error()),
 		)
 
@@ -56,6 +66,20 @@ func NewErrorHandler(logger *slog.Logger) fiber.ErrorHandler {
 			RequestID: requestID,
 		})
 	}
+}
+
+func clientMessage(err error) string {
+	var fiberErr *fiber.Error
+	if errors.As(err, &fiberErr) {
+		return fiberErr.Message
+	}
+
+	var validationErrs validator.ValidationErrors
+	if errors.As(err, &validationErrs) {
+		return formatValidationErrors(validationErrs)
+	}
+
+	return err.Error()
 }
 
 func formatValidationErrors(errs validator.ValidationErrors) string {

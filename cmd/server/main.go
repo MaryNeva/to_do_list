@@ -13,12 +13,16 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres" // migration driver, registered via side-effect import
 	_ "github.com/golang-migrate/migrate/v4/source/file"       // migration source, registered via side-effect import
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"to-do-list/internal/auth/password"
 	"to-do-list/internal/auth/token"
+	"to-do-list/internal/buildinfo"
 	"to-do-list/internal/config"
 	"to-do-list/internal/logger"
+	"to-do-list/internal/observability"
 	"to-do-list/internal/repository/postgres"
+	httpapi "to-do-list/internal/transport/http"
 	"to-do-list/internal/transport/httpserver"
 	"to-do-list/internal/usecase"
 )
@@ -30,15 +34,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	log := logger.New(os.Stdout, cfg.LogLevel, cfg.LogFormat)
+	build := buildinfo.Read()
 
-	if err := run(cfg, log); err != nil {
+	log := logger.New(os.Stdout, cfg.LogLevel, cfg.LogFormat).With(
+		"service", cfg.AppName,
+		"version", build.Version,
+		"commit", build.Commit,
+	)
+
+	if err := run(cfg, log, build); err != nil {
 		log.Error("server exited with an error", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(cfg config.Config, log *slog.Logger) error {
+func run(cfg config.Config, log *slog.Logger, build buildinfo.Info) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -56,6 +66,12 @@ func run(cfg config.Config, log *slog.Logger) error {
 	defer pool.Close()
 
 	log.Info("connected to the database")
+
+	metrics := observability.New(cfg.MetricsNamespace, build)
+	metrics.Preload(knownMetricLabels())
+	if err := metrics.Register(observability.NewPoolCollector(cfg.MetricsNamespace, poolStats(pool))); err != nil {
+		return fmt.Errorf("register pool metrics: %w", err)
+	}
 
 	taskRepo := postgres.NewTaskRepository(pool)
 	userRepo := postgres.NewUserRepository(pool)
@@ -87,7 +103,7 @@ func run(cfg config.Config, log *slog.Logger) error {
 		AdminUsername:     cfg.AdminUsername,
 		DefaultPageSize:   cfg.DefaultPageSize,
 		MaxPageSize:       cfg.MaxPageSize,
-	}, log)
+	}, log, usecase.WithMetrics(metrics))
 
 	authUC := usecase.NewAuthUseCase(userRepo, tokenService, refreshRepo, token.NewIssuer(), hasher, usecase.AuthConfig{
 		AdminUsername:     cfg.AdminUsername,
@@ -97,18 +113,14 @@ func run(cfg config.Config, log *slog.Logger) error {
 		MaxUsernameLength: cfg.UsernameMaxLength,
 		MinPasswordLength: cfg.PasswordMinLength,
 		RefreshTTL:        cfg.JWTRefreshTTL,
-	}, log)
+	}, log, usecase.WithMetrics(metrics))
 
 	cleaner := usecase.NewSessionCleaner(refreshRepo, usecase.SessionCleanupConfig{
 		Interval:  cfg.CleanupInterval,
 		Retention: cfg.RefreshTokenRetention,
 		Timeout:   cfg.DBCallTimeout,
-	}, log)
+	}, log, usecase.WithMetrics(metrics))
 
-	// The cleaner gets its own cancellable context so it is stopped on every
-	// return path, not only on a shutdown signal. The defers are registered
-	// in this order on purpose: they run last-in-first-out, so the goroutine
-	// is told to stop before anything waits for it.
 	cleanupCtx, stopCleanup := context.WithCancel(ctx)
 	var cleanupDone sync.WaitGroup
 	defer cleanupDone.Wait()
@@ -131,17 +143,30 @@ func run(cfg config.Config, log *slog.Logger) error {
 			RateLimitAuthMaxRequests: cfg.RateLimitAuthMaxRequests,
 			RateLimitAuthWindow:      cfg.RateLimitAuthWindow,
 			HealthReadyTimeout:       cfg.HealthReadyTimeout,
+			MetricsEnabled:           cfg.MetricsEnabled,
+			MetricsPath:              cfg.MetricsPath,
 		},
 		log,
+		httpserver.Observability{
+			Requests: metrics,
+			Exporter: metrics.Handler(),
+			Build:    build,
+		},
 		authUC,
 		taskUC,
 		userUC,
-		pool.Ping,
+		httpapi.Check{Name: "postgres", Probe: pool.Ping},
 	)
 
 	serveErr := make(chan error, 1)
 	go func() {
-		log.Info("listening", "address", cfg.ServerAddress)
+		log.Info("listening",
+			"address", cfg.ServerAddress,
+			"metrics_enabled", cfg.MetricsEnabled,
+			"metrics_path", cfg.MetricsPath,
+			"built_at", build.BuiltAt,
+			"go_version", build.GoVersion,
+		)
 		if err := app.Listen(cfg.ServerAddress); err != nil {
 			serveErr <- err
 			return
@@ -170,6 +195,50 @@ func run(cfg config.Config, log *slog.Logger) error {
 
 		log.Info("shutdown complete")
 		return nil
+	}
+}
+
+func knownMetricLabels() observability.KnownLabels {
+	return observability.KnownLabels{
+		AuthOperations: []string{usecase.OperationRegister, usecase.OperationLogin},
+		AuthOutcomes: []string{
+			usecase.OutcomeSuccess,
+			usecase.OutcomeRejected,
+			usecase.OutcomeFailure,
+		},
+		RotationOutcomes: []string{
+			usecase.OutcomeSuccess,
+			usecase.OutcomeReuse,
+			usecase.OutcomeUnknown,
+			usecase.OutcomeExpired,
+			usecase.OutcomeFailure,
+		},
+		RevocationReasons: []string{
+			usecase.ReasonLogout,
+			usecase.ReasonTokenReuse,
+			usecase.ReasonPasswordChange,
+		},
+		CleanupOutcomes: []string{
+			usecase.OutcomeSuccess,
+			usecase.OutcomeFailure,
+		},
+	}
+}
+
+func poolStats(pool *pgxpool.Pool) func() observability.PoolStats {
+	return func() observability.PoolStats {
+		s := pool.Stat()
+		return observability.PoolStats{
+			AcquiredConns:        s.AcquiredConns(),
+			IdleConns:            s.IdleConns(),
+			TotalConns:           s.TotalConns(),
+			MaxConns:             s.MaxConns(),
+			ConstructingConns:    s.ConstructingConns(),
+			AcquireCount:         s.AcquireCount(),
+			EmptyAcquireCount:    s.EmptyAcquireCount(),
+			CanceledAcquireCount: s.CanceledAcquireCount(),
+			AcquireDuration:      s.AcquireDuration(),
+		}
 	}
 }
 
