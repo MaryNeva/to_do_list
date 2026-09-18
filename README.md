@@ -36,8 +36,20 @@ the security and correctness choices behind the auth and ownership checks.
   place (the use-case layer) and is exercised by tests.
 - An optional bootstrap admin login (via env vars, not a database row) that
   can list/manage every user.
-- Structured JSON logging (`log/slog`) with a request ID on every log line
-  and response header.
+- Structured JSON logging (`log/slog`). The request ID is stamped onto every
+  line written while a request is in flight, including lines written deep in
+  a use case, so an access log entry and the warning it caused can be found
+  by one identifier.
+- Prometheus metrics on `/metrics`: RED metrics per route template, plus
+  login/registration outcomes, refresh-token rotations (success, reuse,
+  unknown, expired), sessions ended by reason, connection-pool state and the
+  janitor's work. Label values come from closed sets, so no request can grow
+  the registry.
+- `GET /healthz` reports liveness and the build identity; `GET /readyz`
+  probes every dependency and names the one that is unavailable. The binary's
+  version and revision are also exposed as `todo_build_info`.
+- An optional Prometheus + Grafana stack in the same compose file (behind a
+  profile), with a provisioned dashboard.
 - A central HTTP error handler: every domain error maps to a specific status
   code (404/409/400/401/403), and only that error's message ever reaches the
   client - anything unexpected is logged in full server-side and returned to
@@ -48,7 +60,8 @@ the security and correctness choices behind the auth and ownership checks.
 - Unit tests for every use case, the JWT/password packages, HTTP handlers
   and middleware (fakes, no test-only network calls); a separate
   build-tag-gated integration suite against real Postgres.
-- Docker Compose stack (API + Postgres) for a one-command local deployment.
+- Docker Compose stack (API + Postgres, optionally Prometheus + Grafana) for
+  a one-command local deployment.
 
 ## Architecture
 
@@ -68,19 +81,23 @@ internal/
   transport/
     http/         response/error helpers, central error handler, health checks
       handler/    thin controllers (HTTP <-> use case)
-      middleware/ JWT auth middleware, request logging
+      middleware/ JWT auth, request logging, metrics, request-ID propagation
       dto/        request/response JSON shapes (never expose PasswordHash)
     httpserver/   assembles the fiber app + routes (kept separate from
                   transport/http to avoid an import cycle with handler)
+  observability/  Prometheus registry, collectors, /metrics exposition
+  buildinfo/      version/commit/build date, from -ldflags or the VCS stamps
   config/         configuration loading (config.yaml -> .env -> env vars) + validation
-  logger/         slog setup
+  logger/         slog setup + request-ID context plumbing
   apperr/         transport-agnostic sentinel errors (apperr.ErrNotFound, ...)
 
 config.yaml       non-secret settings, safe to commit (see Configuration below)
 .env.example      secrets template - copy to .env, which is git-ignored
-docker-compose.yml  Postgres + the app, for local/demo deployment
+docker-compose.yml  Postgres + the app; Prometheus + Grafana behind the
+                    "observability" profile
 migrations/       golang-migrate SQL migrations
-deployments/      Dockerfile
+deployments/      Dockerfile, Prometheus scrape config, provisioned Grafana
+                  datasource and dashboard
 scripts/          smoke-test.sh: end-to-end check against the running stack
 docs/openapi.yaml OpenAPI 3 spec
 api/*.http        example requests (IntelliJ HTTP Client / VS Code REST Client)
@@ -234,6 +251,9 @@ column.
 | `ratelimit.auth_max_requests` / `ratelimit.auth_window` | `20` / `1m` | `RATELIMIT_AUTH_MAX_REQUESTS` / `RATELIMIT_AUTH_WINDOW` |
 | `cors.allow_origins` / `allow_methods` / `allow_headers` | `*` / methods / headers | `CORS_ALLOW_ORIGINS` / `CORS_ALLOW_METHODS` / `CORS_ALLOW_HEADERS` |
 | `health.ready_timeout` | `2s` | `HEALTH_READY_TIMEOUT` |
+| `observability.metrics_enabled` | `true` | `METRICS_ENABLED` |
+| `observability.metrics_path` | `/metrics` | `METRICS_PATH` |
+| `observability.metrics_namespace` | `todo` | `METRICS_NAMESPACE` |
 | `log.level` / `log.format` | `info` / `json` | `LOG_LEVEL` / `LOG_FORMAT` |
 | `run_migrations` | `true` | `RUN_MIGRATIONS` |
 | `migrations_path` | `migrations` | `MIGRATIONS_PATH` |
@@ -319,6 +339,122 @@ For a full black-box check against the running Docker stack - HTTP API in,
 Postgres rows out - see `make smoke-test` under
 [Quick start](#quick-start-docker).
 
+## Observability
+
+Three things, in the order you reach for them when something is wrong: a
+dashboard says *something* is wrong, metrics say *what*, logs say *which
+request*.
+
+### Metrics
+
+`GET /metrics` serves the Prometheus text exposition format. Turn it off with
+`observability.metrics_enabled: false`; rename the prefix with
+`observability.metrics_namespace`.
+
+| Metric | Type | Labels | What it answers |
+|---|---|---|---|
+| `todo_http_requests_total` | counter | `method`, `route`, `status` | Throughput and error rate per endpoint |
+| `todo_http_request_duration_seconds` | histogram | `method`, `route` | Latency quantiles per endpoint |
+| `todo_http_requests_in_flight` | gauge | - | Whether requests are queueing |
+| `todo_auth_attempts_total` | counter | `operation`, `outcome` | Failed-login rate, registration conflicts |
+| `todo_auth_refresh_rotations_total` | counter | `outcome` | Token exchanges, and replays of consumed tokens |
+| `todo_auth_sessions_revoked_total` | counter | `reason` | Logouts, password changes, reuse-triggered revocations |
+| `todo_cleanup_runs_total` | counter | `outcome` | Whether the janitor is running and succeeding |
+| `todo_cleanup_refresh_tokens_removed_total` | counter | - | How much it deletes |
+| `todo_cleanup_duration_seconds` | histogram | - | How long a sweep takes |
+| `todo_db_pool_*` | gauges + counters | - | Pool saturation and waiting |
+| `todo_build_info` | gauge (always 1) | `version`, `commit`, `built_at`, `go_version` | Which revision produced a sample |
+
+Plus the standard Go runtime and process collectors.
+
+Two label decisions are worth stating, because getting them wrong is how a
+registry ends up with a million series and an out-of-memory kill:
+
+- `route` is the **route template** (`/api/v1/tasks/:id`), never the concrete
+  path. A request that matched no route is labelled `unmatched`, so a scanner
+  walking random URLs adds nothing.
+- `method` is mapped onto a fixed set of constants, and anything else becomes
+  `other`. This also fixes a real aliasing bug: Fiber returns a method string
+  that points into a buffer fasthttp reuses, and the registry keeps label
+  values for the life of the process, so a `GET` recorded now would later read
+  back as `GETE`. `TestMetrics_MethodLabelIsACopyFromAClosedSet` pins it.
+
+`outcome` separates a caller's mistake from the service's: a wrong password or
+a taken username is `rejected` and normal, while `failure` means the service
+itself broke. Alert on `failure`, not on `rejected`.
+
+`todo_auth_refresh_rotations_total{outcome="reuse"}` is the one counter worth
+paging on. Any increment means a refresh token was presented after it had
+already been consumed - a replay, or a client bug - and every session of that
+account was ended in response.
+
+The endpoint is unauthenticated, like most Prometheus endpoints. Keep it on an
+internal network, or drop `/metrics` at the ingress and scrape the pod
+directly.
+
+### Health
+
+| Endpoint | Purpose | Body |
+|---|---|---|
+| `GET /healthz` | Liveness | `{"status":"ok","build":{"version","commit","built_at","go_version"}}` |
+| `GET /readyz` | Readiness | `{"status":"ready","checks":{"postgres":{"status":"ok","duration_ms":0.4}}}` |
+
+`/healthz` deliberately touches nothing: restarting the process because
+Postgres blinked turns a short outage into a longer one. `/readyz` probes each
+dependency under `health.ready_timeout` and reports them separately, so an
+unready instance says *which* dependency is at fault rather than only that
+something is. It answers `503` if any check fails.
+
+The version and revision come from `-ldflags` (`make build` and the Dockerfile
+both set them) and fall back to the VCS stamps Go embeds, so an un-stamped
+build still reports its commit.
+
+### Log correlation
+
+`requestid` assigns an identifier, one middleware copies it into the request
+context, and the logger's handler stamps it onto every record whose context
+carries it. Nothing below the transport layer knows about request IDs, yet
+their log lines carry them:
+
+```json
+{"level":"WARN","msg":"http_request","method":"POST","path":"/api/v1/auth/refresh","status":401,"request_id":"d60d752a-..."}
+{"level":"WARN","msg":"refresh token reused after it was consumed","user_id":41,"request_id":"d60d752a-..."}
+```
+
+The same identifier is returned in the `X-Request-Id` header and in the
+`request_id` field of every error response, so a user can quote it from a
+failed request and it can be found in the logs.
+
+One subtlety worth knowing if you extend this: Fiber runs the error handler
+*after* every middleware has returned, so at the moment the access-log and
+metrics middleware run, the response still says `200`. Both derive the real
+code from the error through one shared function
+(`httpapi.StatusFor`), which is also what the error handler uses - otherwise
+every 404 would be logged and counted as a success.
+
+### Prometheus and Grafana
+
+Both live in `docker-compose.yml` behind the `observability` profile, so a
+plain `docker compose up` still starts only Postgres and the API.
+
+```bash
+make observability-up     # db + app + Prometheus + Grafana
+# Grafana:    http://localhost:3000   (anonymous viewer access; admin/admin to edit)
+# Prometheus: http://localhost:9090
+make observability-down
+```
+
+The datasource and the dashboard are provisioned from
+`deployments/grafana/provisioning/`, so the **to-do-list service** dashboard is
+there on first load, with RPS and latency per route, the status-code mix, auth
+and refresh outcomes, pool saturation and the janitor's activity.
+
+To look at the raw numbers instead:
+
+```bash
+make metrics              # the todo_* series the running service exposes
+```
+
 ## Notable design decisions
 
 - Tasks and user profiles are scoped by ownership: a task is only visible
@@ -344,6 +480,12 @@ Postgres rows out - see `make smoke-test` under
   requests and closing the database pool before exiting.
 - Migrations (`golang-migrate`) run automatically on startup, toggleable
   with `RUN_MIGRATIONS`.
+- Observability points inward like everything else. `internal/usecase`
+  declares the `MetricsRecorder` interface it needs and knows nothing about
+  Prometheus; `internal/observability` implements it. The recorder is passed
+  as a functional option (`usecase.WithMetrics`), so a use case built without
+  one gets a no-op and every existing construction site - including all the
+  tests - compiles unchanged.
 - Single Go module with package boundaries (`internal/domain`,
   `internal/usecase`, `internal/repository`, `internal/transport`) rather
   than separate modules, keeping `go build ./...` / `go test ./...` simple.
@@ -353,10 +495,13 @@ Postgres rows out - see `make smoke-test` under
 Left out deliberately to keep this a reasonably-sized to-do app rather than
 a distributed system, but worth knowing about:
 
-- Refresh tokens / token revocation (current tokens are short-lived and
-  stateless; there is no logout-side blacklist).
-- Pagination on `GET /tasks` and `GET /users`.
-- OpenTelemetry tracing in addition to the structured logs.
+- OpenTelemetry tracing. Logs and metrics answer "what happened" and "how
+  often"; a trace would answer "where did this one slow request spend its
+  time", which neither can.
+- Alerting rules shipped with the Prometheus config, rather than a dashboard
+  someone has to be looking at.
+- Exemplars linking a latency bucket to a specific trace, once tracing
+  exists.
 - golangci-lint in CI (a `Makefile` `lint` target using `gofmt`+`go vet` is
   included as a lightweight stand-in).
 

@@ -12,6 +12,10 @@ tags:
   - name: auth
   - name: tasks
   - name: users
+  - name: operations
+    description: |
+      Liveness, readiness and metrics. These sit at the root of the service,
+      outside the /api/v1 prefix, and need no authentication.
 
 paths:
   /auth/register:
@@ -270,6 +274,69 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /healthz:
+    servers:
+      - url: http://localhost:8080
+    get:
+      tags: [operations]
+      summary: Liveness probe
+      description: |
+        Answers as long as the process is running. It deliberately touches no
+        dependency: restarting the service because the database blinked makes
+        an outage longer, not shorter. Use /readyz to decide whether to send
+        traffic.
+      security: []
+      responses:
+        '200':
+          description: The process is alive
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+
+  /readyz:
+    servers:
+      - url: http://localhost:8080
+    get:
+      tags: [operations]
+      summary: Readiness probe
+      description: |
+        Probes every dependency, each under health.ready_timeout, and reports
+        them separately so an unready instance names the dependency at fault.
+        Answers 503 if any check fails.
+      security: []
+      responses:
+        '200':
+          description: Every dependency answered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Readiness' }
+        '503':
+          description: At least one dependency is unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Readiness' }
+
+  /metrics:
+    servers:
+      - url: http://localhost:8080
+    get:
+      tags: [operations]
+      summary: Prometheus metrics
+      description: |
+        The Prometheus text exposition format. Served only when
+        observability.metrics_enabled is true, at observability.metrics_path.
+        The endpoint is unauthenticated, so it belongs on an internal network
+        or behind an ingress rule. See the Observability section of README.md
+        for the metric list.
+      security: []
+      responses:
+        '200':
+          description: Metrics in the Prometheus text exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+
 components:
   securitySchemes:
     bearerAuth:
@@ -317,6 +384,64 @@ components:
           schema: { $ref: '#/components/schemas/Error' }
 
   schemas:
+    Health:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        build:
+          $ref: '#/components/schemas/BuildInfo'
+
+    BuildInfo:
+      type: object
+      description: |
+        Identity of the running binary. Set through -ldflags at build time,
+        falling back to the VCS stamps the Go toolchain embeds.
+      properties:
+        version:
+          type: string
+          example: v1.4.0
+        commit:
+          type: string
+          example: 9f2c1ab
+        built_at:
+          type: string
+          example: "2026-09-17T09:12:00Z"
+        go_version:
+          type: string
+          example: go1.24.0
+
+    Readiness:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ready, unavailable]
+        checks:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ReadinessCheck'
+      example:
+        status: ready
+        checks:
+          postgres:
+            status: ok
+            duration_ms: 0.42
+
+    ReadinessCheck:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable]
+        duration_ms:
+          type: number
+          format: double
+        error:
+          type: string
+          description: Present only when the check failed.
+
     Error:
       type: object
       properties:

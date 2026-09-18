@@ -11,7 +11,18 @@ COPY go.mod go.sum* ./
 COPY . .
 RUN go mod tidy && go mod download
 
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server
+# Stamped into the binary and exposed as todo_build_info and GET /healthz, so
+# a running instance can say which revision it is.
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+    -ldflags="-s -w \
+      -X to-do-list/internal/buildinfo.version=${VERSION} \
+      -X to-do-list/internal/buildinfo.commit=${COMMIT} \
+      -X to-do-list/internal/buildinfo.date=${BUILD_DATE}" \
+    -o /out/server ./cmd/server
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata \

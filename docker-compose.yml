@@ -22,6 +22,10 @@ services:
     build:
       context: .
       dockerfile: deployments/Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: todo_app
     restart: unless-stopped
     depends_on:
@@ -51,9 +55,67 @@ services:
       LOG_FORMAT: ${LOG_FORMAT:-}
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-}
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-}
+      METRICS_ENABLED: ${METRICS_ENABLED:-}
+      METRICS_PATH: ${METRICS_PATH:-}
+      METRICS_NAMESPACE: ${METRICS_NAMESPACE:-}
     ports:
       # The container port must match server.address in config.yaml.
       - "${SERVER_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # The two services below belong to the "observability" profile, so a plain
+  # "docker compose up" still starts only the database and the API:
+  #
+  #   docker compose --profile observability up --build -d
+  #
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: todo_prometheus
+    profiles: ["observability"]
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_started
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./deployments/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - todo_prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: todo_grafana
+    profiles: ["observability"]
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_started
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Local convenience only: the dashboard opens without a login. Remove
+      # both lines before putting this anywhere reachable.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./deployments/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deployments/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - todo_grafana_data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
 
 volumes:
   todo_pgdata:
+  todo_prometheus_data:
+  todo_grafana_data:
