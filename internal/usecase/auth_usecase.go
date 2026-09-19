@@ -24,9 +24,9 @@ type RefreshTokenIssuer interface {
 }
 
 type AuthUseCase struct {
-	users   domain.UserRepository
+	users   AuthUsers
 	tokens  TokenService
-	refresh domain.RefreshTokenRepository
+	refresh SessionStore
 	issuer  RefreshTokenIssuer
 	hasher  *password.Hasher
 	cfg     AuthConfig
@@ -45,9 +45,9 @@ type AuthConfig struct {
 }
 
 func NewAuthUseCase(
-	users domain.UserRepository,
+	users AuthUsers,
 	tokens TokenService,
-	refresh domain.RefreshTokenRepository,
+	refresh SessionStore,
 	issuer RefreshTokenIssuer,
 	hasher *password.Hasher,
 	cfg AuthConfig,
@@ -67,8 +67,6 @@ func NewAuthUseCase(
 		metrics: resolved.metrics,
 	}
 }
-
-var _ domain.AuthService = (*AuthUseCase)(nil)
 
 func (a *AuthUseCase) Register(ctx context.Context, username, email, plainPassword string) (domain.User, error) {
 	user, err := a.register(ctx, username, email, plainPassword)
