@@ -256,7 +256,7 @@ func TestLoadFrom_MissingConfigFileReportsEverySetting(t *testing.T) {
 	}
 }
 
-func TestLoadFrom_InvalidValueIsReportedWithTheKeyName(t *testing.T) {
+func TestLoadFrom_InvalidYAMLTypeReportsLocation(t *testing.T) {
 	setSecrets(t)
 
 	yaml := strings.Replace(completeYAML, "  port: 5432", "  port: not-a-number", 1)
@@ -266,8 +266,8 @@ func TestLoadFrom_InvalidValueIsReportedWithTheKeyName(t *testing.T) {
 	if err == nil {
 		t.Fatal("LoadFrom() with a non-numeric db.port should return an error")
 	}
-	if !strings.Contains(err.Error(), "db.port") || !strings.Contains(err.Error(), "not-a-number") {
-		t.Errorf("error should name the key and the bad value, got: %v", err)
+	if !strings.Contains(err.Error(), "line 14") || !strings.Contains(err.Error(), "into int") {
+		t.Errorf("error should identify the invalid YAML type and location, got: %v", err)
 	}
 }
 
@@ -287,7 +287,7 @@ func TestLoadFrom_SecretsAreNeverReadFromYAML(t *testing.T) {
 	if err == nil {
 		t.Fatal("LoadFrom() should refuse to take secrets from config.yaml")
 	}
-	for _, want := range []string{"DB_PASSWORD", "JWT_SECRET", "never in config.yaml"} {
+	for _, want := range []string{"db_password", "jwt_secret", "not found"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
@@ -400,7 +400,7 @@ server:
   address: ":8080"   # trailing comment
   read_timeout: 10s
 
-flat_key: flat-value
+migrations_path: migrations
 `
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write temp config.yaml: %v", err)
@@ -414,7 +414,7 @@ flat_key: flat-value
 	want := map[string]string{
 		"server.address":      ":8080",
 		"server.read_timeout": "10s",
-		"flat_key":            "flat-value",
+		"migrations_path":     "migrations",
 	}
 	for key, wantValue := range want {
 		if values[key] != wantValue {
@@ -436,7 +436,7 @@ func TestReadYAML_MissingFileYieldsEmptyMap(t *testing.T) {
 func TestReadDotEnv_ParsesKeysAndStripsMatchingQuotes(t *testing.T) {
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, ".env")
-	content := "# a comment\n\nQUOTED=\"quoted value\"\nBARE=bare-value\nUNBALANCED=\"still-quoted\nNO_EQUALS_SIGN\n"
+	content := "# a comment\n\nQUOTED=\"quoted value\"\nBARE=bare-value\n"
 	if err := os.WriteFile(envPath, []byte(content), 0o600); err != nil {
 		t.Fatalf("write temp .env: %v", err)
 	}
@@ -447,9 +447,8 @@ func TestReadDotEnv_ParsesKeysAndStripsMatchingQuotes(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"QUOTED":     "quoted value",
-		"BARE":       "bare-value",
-		"UNBALANCED": `"still-quoted`,
+		"QUOTED": "quoted value",
+		"BARE":   "bare-value",
 	}
 	for key, wantValue := range want {
 		if values[key] != wantValue {

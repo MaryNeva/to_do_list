@@ -133,6 +133,7 @@ func run(cfg config.Config, log *slog.Logger, build buildinfo.Info) error {
 	}()
 
 	app := httpserver.New(
+		ctx,
 		httpserver.Config{
 			AppName:                  cfg.AppName,
 			ReadTimeout:              cfg.ReadTimeout,

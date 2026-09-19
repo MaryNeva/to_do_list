@@ -1,13 +1,18 @@
 package http
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
 	"to-do-list/internal/apperr"
@@ -28,15 +33,18 @@ func TestErrorHandler_MapsSentinelErrors(t *testing.T) {
 		name       string
 		err        error
 		wantStatus int
+		wantCode   string
 	}{
-		{"not found", apperr.ErrNotFound, fiber.StatusNotFound},
-		{"conflict", apperr.ErrConflict, fiber.StatusConflict},
-		{"validation", apperr.ErrValidation, fiber.StatusBadRequest},
-		{"invalid credentials", apperr.ErrInvalidCredentials, fiber.StatusUnauthorized},
-		{"unauthorized", apperr.ErrUnauthorized, fiber.StatusUnauthorized},
-		{"forbidden", apperr.ErrForbidden, fiber.StatusForbidden},
-		{"wrapped not found", errWrap(apperr.ErrNotFound, "task 5"), fiber.StatusNotFound},
-		{"unknown error hidden as 500", errors.New("pq: syntax error near GROUP"), fiber.StatusInternalServerError},
+		{"not found", apperr.ErrNotFound, fiber.StatusNotFound, CodeNotFound},
+		{"conflict", apperr.ErrConflict, fiber.StatusConflict, CodeConflict},
+		{"validation", apperr.ErrValidation, fiber.StatusBadRequest, CodeValidation},
+		{"invalid credentials", apperr.ErrInvalidCredentials, fiber.StatusUnauthorized, CodeInvalidCredentials},
+		{"unauthorized", apperr.ErrUnauthorized, fiber.StatusUnauthorized, CodeUnauthorized},
+		{"forbidden", apperr.ErrForbidden, fiber.StatusForbidden, CodeForbidden},
+		{"wrapped not found", errWrap(apperr.ErrNotFound, "task 5"), fiber.StatusNotFound, CodeNotFound},
+		{"unknown error hidden as 500", errors.New("pq: syntax error near GROUP"), fiber.StatusInternalServerError, CodeInternal},
+		{"fiber error carries its status", fiber.NewError(fiber.StatusTooManyRequests, "slow down"), fiber.StatusTooManyRequests, CodeRateLimited},
+		{"fiber error with no code of its own", fiber.NewError(fiber.StatusUnsupportedMediaType, "send JSON"), fiber.StatusUnsupportedMediaType, CodeBadRequest},
 	}
 
 	for _, tt := range tests {
@@ -49,7 +57,73 @@ func TestErrorHandler_MapsSentinelErrors(t *testing.T) {
 			if resp.StatusCode != tt.wantStatus {
 				t.Errorf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
 			}
+
+			raw, _ := io.ReadAll(resp.Body)
+			var body struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(raw, &body); err != nil {
+				t.Fatalf("body is not JSON: %v (%s)", err, raw)
+			}
+			if body.Code != tt.wantCode {
+				t.Errorf("code = %q, want %q", body.Code, tt.wantCode)
+			}
+			if body.Message == "" {
+				t.Error("the envelope carries no message")
+			}
 		})
+	}
+}
+
+// The message may be reworded at will; the code is what a client reads, so a
+// rejected field has to arrive as data rather than inside a sentence.
+func TestErrorHandler_ValidationErrorsNameTheirFields(t *testing.T) {
+	type payload struct {
+		Title string `json:"title" validate:"required"`
+		Email string `json:"email" validate:"required,email"`
+	}
+
+	v := validator.New()
+	v.RegisterTagNameFunc(func(field reflect.StructField) string {
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		return name
+	})
+
+	app := appWithHandlerError(v.Struct(payload{Email: "not-an-email"}))
+	resp, err := app.Test(httptest.NewRequest(fiber.MethodGet, "/x", nil))
+	if err != nil {
+		t.Fatalf("app.Test() unexpected error: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+
+	raw, _ := io.ReadAll(resp.Body)
+	var body struct {
+		Code   string `json:"code"`
+		Fields []struct {
+			Field   string `json:"field"`
+			Message string `json:"message"`
+		} `json:"fields"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("body is not JSON: %v (%s)", err, raw)
+	}
+
+	if body.Code != CodeValidation {
+		t.Errorf("code = %q, want %q", body.Code, CodeValidation)
+	}
+
+	var named []string
+	for _, f := range body.Fields {
+		if f.Message == "" {
+			t.Errorf("field %q carries no message", f.Field)
+		}
+		named = append(named, f.Field)
+	}
+	if !slices.Equal(named, []string{"title", "email"}) {
+		t.Errorf("fields = %v, want the JSON names [title email] (%s)", named, raw)
 	}
 }
 
@@ -96,3 +170,29 @@ type wrappedErr struct {
 
 func (w *wrappedErr) Error() string { return w.msg + ": " + w.err.Error() }
 func (w *wrappedErr) Unwrap() error { return w.err }
+
+// The code says what went wrong; the message should read as a sentence about
+// this request, not repeat the code in words.
+func TestErrorHandler_MessageDropsTheSentinelPrefix(t *testing.T) {
+	app := appWithHandlerError(fmt.Errorf("%w: title must not be empty", apperr.ErrValidation))
+
+	resp, err := app.Test(httptest.NewRequest(fiber.MethodGet, "/x", nil))
+	if err != nil {
+		t.Fatalf("app.Test() unexpected error: %v", err)
+	}
+
+	raw, _ := io.ReadAll(resp.Body)
+	var body struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("body is not JSON: %v (%s)", err, raw)
+	}
+	if body.Code != CodeValidation {
+		t.Errorf("code = %q, want %q", body.Code, CodeValidation)
+	}
+	if body.Message != "title must not be empty" {
+		t.Errorf("message = %q, want it without the sentinel prefix", body.Message)
+	}
+}

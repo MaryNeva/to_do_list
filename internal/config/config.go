@@ -1,14 +1,19 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Config is the fully resolved and validated process configuration.
@@ -589,137 +594,185 @@ func (c Config) DatabaseDSN() string {
 	return u.String()
 }
 
-func readDotEnv(path string) (map[string]string, error) {
+// ReadEnvFile reads literal KEY=value entries. Values are never expanded or
+// executed. Matching outer quotes are removed; their contents remain literal.
+// Empty lines and whole-line comments are ignored. Duplicate keys are errors.
+func ReadEnvFile(path string) (map[string]string, error) {
 	values := make(map[string]string)
-
 	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return values, nil
+	}
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return values, nil
-		}
-
 		return nil, err
 	}
-
-	for _, raw := range strings.Split(string(data), "\n") {
+	for n, raw := range strings.Split(string(data), "\n") {
 		line := strings.TrimSpace(raw)
-
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-
-		key, value, found := strings.Cut(line, "=")
-		if !found {
-			continue
-		}
-
+		key, value, ok := strings.Cut(line, "=")
 		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-
 		value = strings.TrimSpace(value)
-		value = trimOptionalQuotes(value)
-
+		if !ok || !validEnvKey(key) {
+			return nil, fmt.Errorf("invalid environment assignment at line %d", n+1)
+		}
+		if _, ok := values[key]; ok {
+			return nil, fmt.Errorf("duplicate environment key %s at line %d", key, n+1)
+		}
+		if len(value) > 0 && (value[0] == '"' || value[0] == '\'') {
+			if len(value) < 2 || value[len(value)-1] != value[0] {
+				return nil, fmt.Errorf("unclosed environment quote at line %d", n+1)
+			}
+			value = value[1 : len(value)-1]
+		}
+		if strings.ContainsRune(value, 0) {
+			return nil, fmt.Errorf("invalid environment value at line %d", n+1)
+		}
 		values[key] = value
 	}
-
 	return values, nil
+}
+func validEnvKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for i, c := range key {
+		if !(c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || i > 0 && c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
+}
+func readDotEnv(path string) (map[string]string, error) { return ReadEnvFile(path) }
+
+// CommandEnvironment applies the same non-empty environment override policy as
+// LoadFrom, for developer tools which previously sourced .env as shell code.
+func CommandEnvironment(path string, environment []string) ([]string, error) {
+	values, err := ReadEnvFile(path)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range environment {
+		k, v, ok := strings.Cut(entry, "=")
+		if ok {
+			if _, exists := values[k]; v != "" || !exists {
+				values[k] = v
+			}
+		}
+	}
+	result := make([]string, 0, len(values))
+	for k, v := range values {
+		result = append(result, k+"="+v)
+	}
+	return result, nil
+}
+
+// fileConfig is the complete non-secret YAML schema. Pointers distinguish missing values from zero values.
+type fileConfig struct {
+	App struct {
+		Name *string `yaml:"name"`
+		Env  *string `yaml:"env"`
+	} `yaml:"app"`
+	Server struct {
+		Address         *string `yaml:"address"`
+		ReadTimeout     *string `yaml:"read_timeout"`
+		WriteTimeout    *string `yaml:"write_timeout"`
+		ShutdownTimeout *string `yaml:"shutdown_timeout"`
+	} `yaml:"server"`
+	DB struct {
+		Host           *string `yaml:"host"`
+		Port           *int    `yaml:"port"`
+		Name           *string `yaml:"name"`
+		User           *string `yaml:"user"`
+		SSLMode        *string `yaml:"sslmode"`
+		ConnectTimeout *string `yaml:"connect_timeout"`
+		CallTimeout    *string `yaml:"call_timeout"`
+	} `yaml:"db"`
+	JWT struct {
+		TTL             *string `yaml:"ttl"`
+		RefreshTTL      *string `yaml:"refresh_ttl"`
+		Issuer          *string `yaml:"issuer"`
+		MinSecretLength *int    `yaml:"min_secret_length"`
+	} `yaml:"jwt"`
+	Password struct {
+		BcryptCost *int `yaml:"bcrypt_cost"`
+		MinLength  *int `yaml:"min_length"`
+	} `yaml:"password"`
+	User struct {
+		MinUsernameLength *int `yaml:"min_username_length"`
+		MaxUsernameLength *int `yaml:"max_username_length"`
+	} `yaml:"user"`
+	Task struct {
+		MaxTitleLength       *int `yaml:"max_title_length"`
+		MaxDescriptionLength *int `yaml:"max_description_length"`
+	} `yaml:"task"`
+	Pagination struct {
+		DefaultPageSize *int `yaml:"default_page_size"`
+		MaxPageSize     *int `yaml:"max_page_size"`
+	} `yaml:"pagination"`
+	Cleanup struct {
+		Interval              *string `yaml:"interval"`
+		RefreshTokenRetention *string `yaml:"refresh_token_retention"`
+	} `yaml:"cleanup"`
+	Ratelimit struct {
+		AuthMaxRequests *int    `yaml:"auth_max_requests"`
+		AuthWindow      *string `yaml:"auth_window"`
+	} `yaml:"ratelimit"`
+	CORS struct {
+		AllowOrigins *string `yaml:"allow_origins"`
+		AllowMethods *string `yaml:"allow_methods"`
+		AllowHeaders *string `yaml:"allow_headers"`
+	} `yaml:"cors"`
+	Health struct {
+		ReadyTimeout *string `yaml:"ready_timeout"`
+	} `yaml:"health"`
+	Log struct {
+		Level  *string `yaml:"level"`
+		Format *string `yaml:"format"`
+	} `yaml:"log"`
+	Observability struct {
+		MetricsEnabled   *bool   `yaml:"metrics_enabled"`
+		MetricsPath      *string `yaml:"metrics_path"`
+		MetricsNamespace *string `yaml:"metrics_namespace"`
+	} `yaml:"observability"`
+	RunMigrations  *bool   `yaml:"run_migrations"`
+	MigrationsPath *string `yaml:"migrations_path"`
 }
 
 func readYAML(path string) (map[string]string, error) {
 	values := make(map[string]string)
-
 	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return values, nil
+	}
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return values, nil
-		}
-
 		return nil, err
 	}
-
-	var section string
-
-	for _, raw := range strings.Split(string(data), "\n") {
-		line := strings.TrimRight(raw, " \t\r")
-		trimmed := strings.TrimSpace(line)
-
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
+	var cfg fileConfig
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
+		if errors.Is(err, io.EOF) {
+			return values, nil
 		}
-
-		indented := line != trimmed
-
-		key, rawValue, found := strings.Cut(trimmed, ":")
-		if !found {
-			continue
-		}
-
-		key = strings.ToLower(strings.TrimSpace(key))
-		if key == "" {
-			continue
-		}
-
-		value := parseScalar(rawValue)
-
-		if !indented {
-			if value == "" {
-				section = key
-				continue
-			}
-
-			section = ""
-			values[key] = value
-			continue
-		}
-
-		if section == "" {
-			continue
-		}
-
-		values[section+"."+key] = value
+		return nil, err
 	}
-
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("configuration must contain exactly one YAML document")
+	}
+	flattenConfig(reflect.ValueOf(cfg), "", values)
 	return values, nil
 }
-
-// parseScalar extracts a scalar value from the supported YAML subset.
-func parseScalar(raw string) string {
-	value := strings.TrimSpace(raw)
-	if value == "" {
-		return ""
-	}
-
-	if value[0] == '"' || value[0] == '\'' {
-		quote := value[0]
-
-		if end := strings.IndexByte(value[1:], quote); end >= 0 {
-			return value[1 : end+1]
+func flattenConfig(v reflect.Value, prefix string, out map[string]string) {
+	for i := 0; i < v.NumField(); i++ {
+		field := v.Field(i)
+		key := prefix + v.Type().Field(i).Tag.Get("yaml")
+		if field.Kind() == reflect.Struct {
+			flattenConfig(field, key+".", out)
+		} else if !field.IsNil() {
+			out[key] = fmt.Sprint(field.Elem().Interface())
 		}
-
-		return value[1:]
 	}
-
-	if index := strings.Index(value, " #"); index >= 0 {
-		value = value[:index]
-	}
-
-	return strings.TrimSpace(value)
-}
-
-func trimOptionalQuotes(value string) string {
-	if len(value) < 2 {
-		return value
-	}
-
-	first := value[0]
-	last := value[len(value)-1]
-
-	if (first == '"' && last == '"') ||
-		(first == '\'' && last == '\'') {
-		return value[1 : len(value)-1]
-	}
-
-	return value
 }

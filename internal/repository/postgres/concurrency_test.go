@@ -107,12 +107,12 @@ func TestConcurrent_ProfileUpdatesThroughUseCase(t *testing.T) {
 	go func() {
 		defer done.Done()
 		start.Wait()
-		_, errs[0] = uc.Update(ctx, user.ID, "", "changed@example.com", "")
+		_, errs[0] = uc.Update(ctx, domain.Claims{UserID: user.ID}, user.ID, "", "changed@example.com", "")
 	}()
 	go func() {
 		defer done.Done()
 		start.Wait()
-		_, errs[1] = uc.Update(ctx, user.ID, "", "", "brand-new-password")
+		_, errs[1] = uc.Update(ctx, domain.Claims{UserID: user.ID}, user.ID, "", "", "brand-new-password")
 	}()
 	start.Done()
 	done.Wait()
@@ -132,7 +132,7 @@ func TestConcurrent_ProfileUpdatesThroughUseCase(t *testing.T) {
 	}
 }
 
-func newTaskUseCaseForIntegration(repo domain.TaskRepository) *usecase.TaskUseCase {
+func newTaskUseCaseForIntegration(repo usecase.TaskRepository) *usecase.TaskUseCase {
 	return usecase.NewTaskUseCase(repo, usecase.TaskConfig{
 		Timeout:              5 * time.Second,
 		MaxTitleLength:       200,
@@ -173,7 +173,7 @@ func TestConcurrent_TwoTogglesProduceTwoTransitions(t *testing.T) {
 			go func(i int) {
 				defer done.Done()
 				start.Wait()
-				_, errs[i] = uc.ToggleStatus(ctx, user.ID, task.ID)
+				_, errs[i] = uc.ToggleStatus(ctx, domain.Claims{UserID: user.ID}, task.ID)
 			}(i)
 		}
 		start.Done()
@@ -217,7 +217,7 @@ func TestConcurrent_ManyTogglesLandOnTheRightStatus(t *testing.T) {
 		go func(i int) {
 			defer done.Done()
 			start.Wait()
-			_, errs[i] = uc.ToggleStatus(ctx, user.ID, task.ID)
+			_, errs[i] = uc.ToggleStatus(ctx, domain.Claims{UserID: user.ID}, task.ID)
 		}(i)
 	}
 	start.Done()

@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http/httptest"
@@ -22,7 +23,7 @@ func loggingApp(w *bytes.Buffer) *fiber.App {
 		},
 	})
 	app.Use(requestid.New())
-	app.Use(RequestContext())
+	app.Use(RequestContext(context.Background()))
 	app.Use(RequestLogger(logpkg.New(w, "info", "json")))
 	app.Get("/ok", func(c *fiber.Ctx) error { return c.SendString("ok") })
 	app.Get("/missing", func(c *fiber.Ctx) error { return apperr.ErrNotFound })
