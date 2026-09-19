@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
-
-	"to-do-list/internal/domain"
 )
 
 type SessionCleanupConfig struct {
@@ -16,13 +14,13 @@ type SessionCleanupConfig struct {
 }
 
 type SessionCleaner struct {
-	refresh domain.RefreshTokenRepository
+	refresh ExpiredSessions
 	cfg     SessionCleanupConfig
 	logger  *slog.Logger
 	metrics MetricsRecorder
 }
 
-func NewSessionCleaner(refresh domain.RefreshTokenRepository, cfg SessionCleanupConfig, logger *slog.Logger, opts ...Option) *SessionCleaner {
+func NewSessionCleaner(refresh ExpiredSessions, cfg SessionCleanupConfig, logger *slog.Logger, opts ...Option) *SessionCleaner {
 	resolved := applyOptions(opts)
 	return &SessionCleaner{refresh: refresh, cfg: cfg, logger: logger, metrics: resolved.metrics}
 }

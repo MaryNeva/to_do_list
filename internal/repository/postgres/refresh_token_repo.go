@@ -43,8 +43,6 @@ func NewRefreshTokenRepository(pool *pgxpool.Pool) *RefreshTokenRepository {
 	return &RefreshTokenRepository{pool: pool}
 }
 
-var _ domain.RefreshTokenRepository = (*RefreshTokenRepository)(nil)
-
 func (r *RefreshTokenRepository) Create(ctx context.Context, token domain.RefreshToken, credentialsVersion int64) (domain.RefreshToken, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {

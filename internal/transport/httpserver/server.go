@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"time"
@@ -13,7 +14,6 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/requestid"
 
 	"to-do-list/internal/buildinfo"
-	"to-do-list/internal/domain"
 	httpapi "to-do-list/internal/transport/http"
 	"to-do-list/internal/transport/http/handler"
 	appmiddleware "to-do-list/internal/transport/http/middleware"
@@ -40,13 +40,16 @@ type Observability struct {
 	Build    buildinfo.Info
 }
 
+// New builds the application. Every request context derives from base, so
+// cancelling it stops in-flight work at shutdown.
 func New(
+	base context.Context,
 	cfg Config,
 	logger *slog.Logger,
 	obs Observability,
-	authSvc domain.AuthService,
-	taskSvc domain.TaskService,
-	userSvc domain.UserService,
+	authSvc AuthService,
+	taskSvc handler.TaskService,
+	userSvc handler.UserService,
 	checks ...httpapi.Check,
 ) *fiber.App {
 	app := fiber.New(fiber.Config{
@@ -57,7 +60,7 @@ func New(
 	})
 
 	app.Use(requestid.New())
-	app.Use(appmiddleware.RequestContext())
+	app.Use(appmiddleware.RequestContext(base))
 
 	if obs.Requests != nil {
 		app.Use(appmiddleware.Metrics(obs.Requests, cfg.MetricsPath))
@@ -87,6 +90,11 @@ func New(
 	authLimiter := limiter.New(limiter.Config{
 		Max:        cfg.RateLimitAuthMaxRequests,
 		Expiration: cfg.RateLimitAuthWindow,
+		// Without this the limiter writes its own plain-text body, which is
+		// the one response that would not carry an error code.
+		LimitReached: func(*fiber.Ctx) error {
+			return fiber.NewError(fiber.StatusTooManyRequests, "too many requests, try again later")
+		},
 	})
 
 	v1 := app.Group("/api/v1")
@@ -105,4 +113,10 @@ func New(
 	handler.NewUserHandler(userSvc).Mount(protected.Group("/users"))
 
 	return app
+}
+
+// AuthService combines the independent handler and middleware contracts at composition.
+type AuthService interface {
+	handler.AuthService
+	appmiddleware.TokenValidator
 }

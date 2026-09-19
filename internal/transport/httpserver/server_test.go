@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -46,35 +49,35 @@ func (a panickingAuth) ValidateToken(context.Context, string) (domain.Claims, er
 
 type stubTasks struct{}
 
-func (stubTasks) Create(context.Context, int64, string, string) (domain.Task, error) {
+func (stubTasks) Create(context.Context, domain.Claims, string, string) (domain.Task, error) {
 	return domain.Task{}, apperr.ErrValidation
 }
-func (stubTasks) Get(context.Context, int64, int64) (domain.Task, error) {
+func (stubTasks) Get(context.Context, domain.Claims, int64) (domain.Task, error) {
 	return domain.Task{}, apperr.ErrNotFound
 }
-func (stubTasks) List(context.Context, int64, domain.TaskFilter) (domain.Page[domain.Task], error) {
+func (stubTasks) List(context.Context, domain.Claims, domain.TaskFilter) (domain.Page[domain.Task], error) {
 	return domain.Page[domain.Task]{}, nil
 }
-func (stubTasks) Update(context.Context, int64, int64, string, string) (domain.Task, error) {
+func (stubTasks) Update(context.Context, domain.Claims, int64, domain.TaskUpdate) (domain.Task, error) {
 	return domain.Task{}, apperr.ErrNotFound
 }
-func (stubTasks) Delete(context.Context, int64, int64) error { return apperr.ErrNotFound }
-func (stubTasks) ToggleStatus(context.Context, int64, int64) (domain.Task, error) {
+func (stubTasks) Delete(context.Context, domain.Claims, int64) error { return apperr.ErrNotFound }
+func (stubTasks) ToggleStatus(context.Context, domain.Claims, int64) (domain.Task, error) {
 	return domain.Task{}, apperr.ErrNotFound
 }
 
 type stubUsers struct{}
 
-func (stubUsers) Get(context.Context, int64) (domain.User, error) {
+func (stubUsers) Get(context.Context, domain.Claims, int64) (domain.User, error) {
 	return domain.User{}, apperr.ErrNotFound
 }
-func (stubUsers) List(context.Context, domain.PageRequest) (domain.Page[domain.User], error) {
+func (stubUsers) List(context.Context, domain.Claims, domain.PageRequest) (domain.Page[domain.User], error) {
 	return domain.Page[domain.User]{}, nil
 }
-func (stubUsers) Update(context.Context, int64, string, string, string) (domain.User, error) {
+func (stubUsers) Update(context.Context, domain.Claims, int64, string, string, string) (domain.User, error) {
 	return domain.User{}, apperr.ErrNotFound
 }
-func (stubUsers) Delete(context.Context, int64) error { return apperr.ErrNotFound }
+func (stubUsers) Delete(context.Context, domain.Claims, int64) error { return apperr.ErrNotFound }
 
 type countingRecorder struct {
 	mu sync.Mutex
@@ -117,13 +120,14 @@ func (r *countingRecorder) snapshot() ([]recordedRequest, int, int) {
 	return append([]recordedRequest(nil), r.requests...), r.inFlight, r.peak
 }
 
-func assembledApp(t *testing.T, auth domain.AuthService) (*fiber.App, *countingRecorder, *bytes.Buffer) {
+func assembledApp(t *testing.T, auth AuthService) (*fiber.App, *countingRecorder, *bytes.Buffer) {
 	t.Helper()
 
 	recorder := &countingRecorder{}
 	var logs bytes.Buffer
 
 	app := New(
+		context.Background(),
 		Config{
 			AppName:                  "to-do-list-test",
 			ReadTimeout:              time.Second,
@@ -266,5 +270,140 @@ func TestApp_HealthEndpointsAreServed(t *testing.T) {
 		if resp.StatusCode != fiber.StatusOK {
 			t.Errorf("GET %s = %d, want 200", path, resp.StatusCode)
 		}
+	}
+}
+
+type acceptingAuth struct{ panickingAuth }
+
+func (acceptingAuth) ValidateToken(context.Context, string) (domain.Claims, error) {
+	return domain.Claims{UserID: 7}, nil
+}
+
+type blockingUsers struct {
+	stubUsers
+	entered chan struct{}
+	seen    chan error
+}
+
+func (u blockingUsers) Get(ctx context.Context, _ domain.Claims, _ int64) (domain.User, error) {
+	close(u.entered)
+	// The timeout keeps a regression from wedging the suite: without
+	// cancellation this would otherwise block shutdown for ever.
+	select {
+	case <-ctx.Done():
+	case <-time.After(3 * time.Second):
+	}
+	u.seen <- ctx.Err()
+	return domain.User{}, ctx.Err()
+}
+
+// Cancelling the context the server was built with has to reach work already
+// running. Fiber's UserContext starts as context.Background, so this only
+// holds because the app derives request contexts from that base; app.Test
+// cannot show it, because fasthttp ties cancellation to a real server.
+func TestApp_ShutdownCancelsWorkInFlight(t *testing.T) {
+	base, shutdown := context.WithCancel(context.Background())
+	defer shutdown()
+
+	users := blockingUsers{entered: make(chan struct{}), seen: make(chan error, 1)}
+
+	app := New(
+		base,
+		Config{
+			AppName: "to-do-list-test", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second,
+			CORSAllowOrigins: "*", CORSAllowMethods: "GET", CORSAllowHeaders: "Content-Type",
+			RateLimitAuthMaxRequests: 100, RateLimitAuthWindow: time.Minute,
+			HealthReadyTimeout: time.Second, MetricsPath: "/metrics",
+		},
+		logger.New(io.Discard, "error", "json"),
+		Observability{Build: buildinfo.Info{Version: "test"}},
+		acceptingAuth{},
+		stubTasks{},
+		users,
+	)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go app.Listener(ln)
+	defer app.Shutdown()
+
+	go func() {
+		req, _ := http.NewRequest(fiber.MethodGet, "http://"+ln.Addr().String()+"/api/v1/users/7", nil)
+		req.Header.Set(fiber.HeaderAuthorization, "Bearer token")
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			resp.Body.Close()
+		}
+	}()
+
+	select {
+	case <-users.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request never reached the service")
+	}
+
+	shutdown()
+
+	select {
+	case err := <-users.seen:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("service saw %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not cancel the work already running")
+	}
+}
+
+// The rate limiter answers on its own, before any handler, and used to write
+// a bare "Too Many Requests" - the one response a client could not read the
+// way it reads every other failure.
+func TestApp_RateLimitedRequestCarriesTheErrorEnvelope(t *testing.T) {
+	app := New(
+		context.Background(),
+		Config{
+			AppName: "to-do-list-test", ReadTimeout: time.Second, WriteTimeout: time.Second,
+			CORSAllowOrigins: "*", CORSAllowMethods: "POST", CORSAllowHeaders: "Content-Type",
+			RateLimitAuthMaxRequests: 1, RateLimitAuthWindow: time.Minute,
+			HealthReadyTimeout: time.Second, MetricsPath: "/metrics",
+		},
+		logger.New(io.Discard, "error", "json"),
+		Observability{Build: buildinfo.Info{Version: "test"}},
+		panickingAuth{},
+		stubTasks{},
+		stubUsers{},
+	)
+
+	var resp *http.Response
+	for attempt := 0; attempt < 2; attempt++ {
+		req := httptest.NewRequest(fiber.MethodPost, "/api/v1/auth/login",
+			strings.NewReader(`{"username":"mary","password":"secret123"}`))
+		req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+
+		var err error
+		resp, err = app.Test(req)
+		if err != nil {
+			t.Fatalf("request %d: %v", attempt, err)
+		}
+	}
+
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusTooManyRequests)
+	}
+
+	raw, _ := io.ReadAll(resp.Body)
+	var envelope struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("the 429 body is not JSON: %v (%s)", err, raw)
+	}
+	if envelope.Code != "rate_limited" {
+		t.Errorf("code = %q, want %q (%s)", envelope.Code, "rate_limited", raw)
+	}
+	if envelope.Message == "" {
+		t.Errorf("the 429 body carries no message: %s", raw)
 	}
 }

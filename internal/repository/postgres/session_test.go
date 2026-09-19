@@ -92,7 +92,7 @@ func (f sessionFixture) activeSessions(t *testing.T) int {
 }
 
 type barrierRefreshRepo struct {
-	domain.RefreshTokenRepository
+	usecase.SessionStore
 	beforeRotate func()
 	beforeCreate func()
 }
@@ -101,14 +101,14 @@ func (r *barrierRefreshRepo) Rotate(ctx context.Context, presentedHash string, r
 	if r.beforeRotate != nil {
 		r.beforeRotate()
 	}
-	return r.RefreshTokenRepository.Rotate(ctx, presentedHash, replacement)
+	return r.SessionStore.Rotate(ctx, presentedHash, replacement)
 }
 
 func (r *barrierRefreshRepo) Create(ctx context.Context, token domain.RefreshToken, credentialsVersion int64) (domain.RefreshToken, error) {
 	if r.beforeCreate != nil {
 		r.beforeCreate()
 	}
-	return r.RefreshTokenRepository.Create(ctx, token, credentialsVersion)
+	return r.SessionStore.Create(ctx, token, credentialsVersion)
 }
 
 func TestConcurrentRefresh_OnlyOneCallerConsumesTheToken(t *testing.T) {
@@ -118,7 +118,7 @@ func TestConcurrentRefresh_OnlyOneCallerConsumesTheToken(t *testing.T) {
 	const callers = 6
 	var ready sync.WaitGroup
 	ready.Add(callers)
-	barrier := &barrierRefreshRepo{RefreshTokenRepository: f.refresh, beforeRotate: func() {
+	barrier := &barrierRefreshRepo{SessionStore: f.refresh, beforeRotate: func() {
 		ready.Done()
 		ready.Wait()
 	}}
@@ -199,7 +199,7 @@ func TestRotationCrossingRevocation_NoLiveDescendantSurvives(t *testing.T) {
 	var bothInPosition sync.WaitGroup
 	bothInPosition.Add(2)
 
-	barrier := &barrierRefreshRepo{RefreshTokenRepository: f.refresh, beforeRotate: func() {
+	barrier := &barrierRefreshRepo{SessionStore: f.refresh, beforeRotate: func() {
 		bothInPosition.Done()
 		bothInPosition.Wait()
 	}}
@@ -241,7 +241,7 @@ func TestPasswordChange_EndsExistingSessions(t *testing.T) {
 	ctx := context.Background()
 	tokens := f.login(t)
 
-	if _, err := f.userUC.Update(ctx, f.user.ID, "", "", "brand-new-password"); err != nil {
+	if _, err := f.userUC.Update(ctx, domain.Claims{UserID: f.user.ID}, f.user.ID, "", "", "brand-new-password"); err != nil {
 		t.Fatalf("change password: %v", err)
 	}
 
@@ -265,7 +265,7 @@ func TestPasswordChangeCrossingRotation_NoSessionOutlivesTheChange(t *testing.T)
 	var bothInPosition sync.WaitGroup
 	bothInPosition.Add(2)
 
-	barrier := &barrierRefreshRepo{RefreshTokenRepository: f.refresh, beforeRotate: func() {
+	barrier := &barrierRefreshRepo{SessionStore: f.refresh, beforeRotate: func() {
 		bothInPosition.Done()
 		bothInPosition.Wait()
 	}}
@@ -288,7 +288,7 @@ func TestPasswordChangeCrossingRotation_NoSessionOutlivesTheChange(t *testing.T)
 		defer done.Done()
 		bothInPosition.Done()
 		bothInPosition.Wait()
-		_, changeErr = f.userUC.Update(context.Background(), f.user.ID, "", "", "brand-new-password")
+		_, changeErr = f.userUC.Update(context.Background(), domain.Claims{UserID: f.user.ID}, f.user.ID, "", "", "brand-new-password")
 	}()
 	done.Wait()
 
@@ -374,7 +374,7 @@ func TestPasswordChange_WaitsForWhoeverHoldsTheUserRow(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := f.userUC.Update(context.Background(), f.user.ID, "", "", "brand-new-password")
+		_, err := f.userUC.Update(context.Background(), domain.Claims{UserID: f.user.ID}, f.user.ID, "", "", "brand-new-password")
 		result <- err
 	}()
 
@@ -415,7 +415,7 @@ func TestPasswordChange_FailedUpdateKeepsSessions(t *testing.T) {
 		t.Fatal("the fixture should start with one active session")
 	}
 
-	_, err = f.userUC.Update(ctx, f.user.ID, "bob", "", "brand-new-password")
+	_, err = f.userUC.Update(ctx, domain.Claims{UserID: f.user.ID}, f.user.ID, "bob", "", "brand-new-password")
 	if !errors.Is(err, apperr.ErrConflict) {
 		t.Fatalf("Update() error = %v, want apperr.ErrConflict", err)
 	}
@@ -429,7 +429,7 @@ func TestPasswordChange_FailedUpdateKeepsSessions(t *testing.T) {
 	}
 }
 
-func (f sessionFixture) loginWith(t *testing.T, refresh domain.RefreshTokenRepository) (domain.Tokens, error) {
+func (f sessionFixture) loginWith(t *testing.T, refresh usecase.SessionStore) (domain.Tokens, error) {
 	t.Helper()
 
 	tokenSvc, err := token.NewService("0123456789abcdef0123456789abcdef", time.Hour, "to-do-list", 32)
@@ -454,7 +454,7 @@ func TestLogin_CannotStoreASessionForAPasswordThatHasBeenReplaced(t *testing.T) 
 	changed := make(chan struct{})
 
 	barrier := &barrierRefreshRepo{
-		RefreshTokenRepository: f.refresh,
+		SessionStore: f.refresh,
 		beforeCreate: func() {
 			close(verified)
 			<-changed
@@ -472,7 +472,7 @@ func TestLogin_CannotStoreASessionForAPasswordThatHasBeenReplaced(t *testing.T) 
 	// The login has verified the old password and is about to store its
 	// session. Change the password underneath it.
 	<-verified
-	if _, err := f.userUC.Update(ctx, f.user.ID, "", "", "a-brand-new-password"); err != nil {
+	if _, err := f.userUC.Update(ctx, domain.Claims{UserID: f.user.ID}, f.user.ID, "", "", "a-brand-new-password"); err != nil {
 		t.Fatalf("change password: %v", err)
 	}
 	close(changed)
@@ -505,7 +505,7 @@ func TestLogin_AfterAPasswordChangeOpensAFreshSession(t *testing.T) {
 
 	f.login(t)
 
-	if _, err := f.userUC.Update(ctx, f.user.ID, "", "", "a-brand-new-password"); err != nil {
+	if _, err := f.userUC.Update(ctx, domain.Claims{UserID: f.user.ID}, f.user.ID, "", "", "a-brand-new-password"); err != nil {
 		t.Fatalf("change password: %v", err)
 	}
 	if active := f.activeSessions(t); active != 0 {
