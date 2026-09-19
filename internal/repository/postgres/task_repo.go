@@ -45,8 +45,6 @@ func NewTaskRepository(pool *pgxpool.Pool) *TaskRepository {
 	return &TaskRepository{pool: pool}
 }
 
-var _ domain.TaskRepository = (*TaskRepository)(nil)
-
 func (r *TaskRepository) Create(ctx context.Context, task domain.Task) (domain.Task, error) {
 	query := `INSERT INTO tasks (title, description, status, creator_id)
 	          VALUES ($1, $2, $3, $4)
@@ -142,10 +140,24 @@ func orderClause(filter domain.TaskFilter) string {
 	return column + " " + direction + ", id " + direction
 }
 
-func (r *TaskRepository) Update(ctx context.Context, task domain.Task) (domain.Task, error) {
-	query := `UPDATE tasks SET title = $1, description = $2 WHERE id = $3 RETURNING ` + taskColumns
+// Update writes only the fields the caller sent, and checks ownership in the
+// same statement. Nothing is read first, so two clients editing different
+// fields of one task both keep their change.
+func (r *TaskRepository) Update(ctx context.Context, id, ownerID int64, update domain.TaskUpdate) (domain.Task, error) {
+	var status *string
+	if update.Status != nil {
+		s := string(*update.Status)
+		status = &s
+	}
 
-	rows, err := r.pool.Query(ctx, query, task.Title, task.Description, task.ID)
+	query := `UPDATE tasks
+	          SET title       = COALESCE($3, title),
+	              description = COALESCE($4, description),
+	              status      = COALESCE($5, status)
+	          WHERE id = $1 AND creator_id = $2
+	          RETURNING ` + taskColumns
+
+	rows, err := r.pool.Query(ctx, query, id, ownerID, update.Title, update.Description, status)
 	if err != nil {
 		return domain.Task{}, fmt.Errorf("postgres: update task: %w", err)
 	}

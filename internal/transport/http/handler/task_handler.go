@@ -12,12 +12,12 @@ import (
 )
 
 type TaskHandler struct {
-	tasks    domain.TaskService
+	tasks    TaskService
 	validate *validator.Validate
 }
 
-func NewTaskHandler(tasks domain.TaskService) *TaskHandler {
-	return &TaskHandler{tasks: tasks, validate: validator.New()}
+func NewTaskHandler(tasks TaskService) *TaskHandler {
+	return &TaskHandler{tasks: tasks, validate: newValidator()}
 }
 
 func (h *TaskHandler) Mount(router fiber.Router) {
@@ -51,7 +51,7 @@ func (h *TaskHandler) Create(c *fiber.Ctx) error {
 		return err
 	}
 
-	task, err := h.tasks.Create(c.Context(), claims.UserID, req.Title, req.Description)
+	task, err := h.tasks.Create(c.UserContext(), claims, req.Title, req.Description)
 	if err != nil {
 		return err
 	}
@@ -70,7 +70,7 @@ func (h *TaskHandler) Get(c *fiber.Ctx) error {
 		return err
 	}
 
-	task, err := h.tasks.Get(c.Context(), claims.UserID, id)
+	task, err := h.tasks.Get(c.UserContext(), claims, id)
 	if err != nil {
 		return err
 	}
@@ -89,7 +89,7 @@ func (h *TaskHandler) List(c *fiber.Ctx) error {
 		return err
 	}
 
-	page, err := h.tasks.List(c.Context(), claims.UserID, filter)
+	page, err := h.tasks.List(c.UserContext(), claims, filter)
 	if err != nil {
 		return err
 	}
@@ -112,11 +112,8 @@ func (h *TaskHandler) Update(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
-	if err := h.validate.Struct(req); err != nil {
-		return err
-	}
 
-	task, err := h.tasks.Update(c.Context(), claims.UserID, id, req.Title, req.Description)
+	task, err := h.tasks.Update(c.UserContext(), claims, id, req.ToDomain())
 	if err != nil {
 		return err
 	}
@@ -135,7 +132,7 @@ func (h *TaskHandler) Delete(c *fiber.Ctx) error {
 		return err
 	}
 
-	if err := h.tasks.Delete(c.Context(), claims.UserID, id); err != nil {
+	if err := h.tasks.Delete(c.UserContext(), claims, id); err != nil {
 		return err
 	}
 
@@ -153,7 +150,7 @@ func (h *TaskHandler) ToggleStatus(c *fiber.Ctx) error {
 		return err
 	}
 
-	task, err := h.tasks.ToggleStatus(c.Context(), claims.UserID, id)
+	task, err := h.tasks.ToggleStatus(c.UserContext(), claims, id)
 	if err != nil {
 		return err
 	}

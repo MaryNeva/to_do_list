@@ -11,9 +11,21 @@ type CreateTaskRequest struct {
 	Description string `json:"description"`
 }
 
+// UpdateTaskRequest is a partial edit: an omitted field keeps its value, a
+// field sent as "" clears it (title excepted), and null reads as omitted.
 type UpdateTaskRequest struct {
-	Title       string `json:"title" validate:"required"`
-	Description string `json:"description"`
+	Title       *string `json:"title"`
+	Description *string `json:"description"`
+	Status      *string `json:"status"`
+}
+
+func (r UpdateTaskRequest) ToDomain() domain.TaskUpdate {
+	update := domain.TaskUpdate{Title: r.Title, Description: r.Description}
+	if r.Status != nil {
+		status := domain.TaskStatus(*r.Status)
+		update.Status = &status
+	}
+	return update
 }
 
 type TaskResponse struct {

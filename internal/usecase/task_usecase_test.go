@@ -83,18 +83,25 @@ func (f *fakeTaskRepo) ListByCreator(_ context.Context, creatorID int64, filter 
 	return domain.NewPage(matched[filter.Page.Offset:end], total, filter.Page), nil
 }
 
-func (f *fakeTaskRepo) Update(_ context.Context, task domain.Task) (domain.Task, error) {
+func (f *fakeTaskRepo) Update(_ context.Context, id, ownerID int64, update domain.TaskUpdate) (domain.Task, error) {
 	if f.forceErr != nil {
 		return domain.Task{}, f.forceErr
 	}
-	existing, ok := f.tasks[task.ID]
-	if !ok {
+	existing, ok := f.tasks[id]
+	if !ok || existing.CreatorID != ownerID {
 		return domain.Task{}, apperr.ErrNotFound
 	}
-	existing.Title = task.Title
-	existing.Description = task.Description
+	if update.Title != nil {
+		existing.Title = *update.Title
+	}
+	if update.Description != nil {
+		existing.Description = *update.Description
+	}
+	if update.Status != nil {
+		existing.Status = *update.Status
+	}
 	existing.UpdatedAt = time.Now()
-	f.tasks[task.ID] = existing
+	f.tasks[id] = existing
 	return existing, nil
 }
 
@@ -130,6 +137,11 @@ func silentLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// actor builds the claims a signed-in user of that id would carry.
+func actor(id int64) domain.Claims { return domain.Claims{UserID: id} }
+
+func ptr[T any](v T) *T { return &v }
+
 func testTaskConfig() TaskConfig {
 	return TaskConfig{
 		Timeout:              time.Second,
@@ -163,7 +175,7 @@ func TestTaskUseCase_Create(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			uc, _ := newTaskUseCaseForTest()
 
-			task, err := uc.Create(context.Background(), 1, tt.title, tt.description)
+			task, err := uc.Create(context.Background(), actor(1), tt.title, tt.description)
 
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
@@ -198,7 +210,7 @@ func TestTaskUseCase_Get_OwnershipEnforced(t *testing.T) {
 	}
 
 	t.Run("owner can read", func(t *testing.T) {
-		got, err := uc.Get(context.Background(), 1, owned.ID)
+		got, err := uc.Get(context.Background(), actor(1), owned.ID)
 		if err != nil {
 			t.Fatalf("Get() unexpected error: %v", err)
 		}
@@ -208,14 +220,14 @@ func TestTaskUseCase_Get_OwnershipEnforced(t *testing.T) {
 	})
 
 	t.Run("non-owner is told not found, not forbidden", func(t *testing.T) {
-		_, err := uc.Get(context.Background(), 2, owned.ID)
+		_, err := uc.Get(context.Background(), actor(2), owned.ID)
 		if !errors.Is(err, apperr.ErrNotFound) {
 			t.Errorf("Get() by a different user error = %v, want apperr.ErrNotFound", err)
 		}
 	})
 
 	t.Run("missing task is not found", func(t *testing.T) {
-		_, err := uc.Get(context.Background(), 1, 99999)
+		_, err := uc.Get(context.Background(), actor(1), 99999)
 		if !errors.Is(err, apperr.ErrNotFound) {
 			t.Errorf("Get() for a missing task error = %v, want apperr.ErrNotFound", err)
 		}
@@ -226,11 +238,15 @@ func TestTaskUseCase_Update_OwnershipEnforced(t *testing.T) {
 	uc, repo := newTaskUseCaseForTest()
 	owned, _ := repo.Create(context.Background(), domain.Task{Title: "mine", CreatorID: 1})
 
-	if _, err := uc.Update(context.Background(), 2, owned.ID, "hijacked", ""); !errors.Is(err, apperr.ErrNotFound) {
+	hijack := domain.TaskUpdate{Title: ptr("hijacked")}
+	if _, err := uc.Update(context.Background(), actor(2), owned.ID, hijack); !errors.Is(err, apperr.ErrNotFound) {
 		t.Errorf("Update() by a different user error = %v, want apperr.ErrNotFound", err)
 	}
 
-	updated, err := uc.Update(context.Background(), 1, owned.ID, "renamed", "new description")
+	updated, err := uc.Update(context.Background(), actor(1), owned.ID, domain.TaskUpdate{
+		Title:       ptr("renamed"),
+		Description: ptr("new description"),
+	})
 	if err != nil {
 		t.Fatalf("Update() by the owner unexpected error: %v", err)
 	}
@@ -239,18 +255,134 @@ func TestTaskUseCase_Update_OwnershipEnforced(t *testing.T) {
 	}
 }
 
+// The three cases a partial update has to keep apart: a field that was not
+// sent, a field sent empty, and a field sent with something the task cannot
+// hold.
+func TestTaskUseCase_Update_PartialSemantics(t *testing.T) {
+	ctx := context.Background()
+	long := strings.Repeat("x", 201)
+
+	for _, tc := range []struct {
+		name            string
+		update          domain.TaskUpdate
+		wantErr         error
+		wantTitle       string
+		wantDescription string
+		wantStatus      domain.TaskStatus
+	}{
+		{
+			name:   "absent fields keep their values",
+			update: domain.TaskUpdate{Title: ptr("renamed")},
+			// This is the bug this test exists for: renaming used to blank
+			// the description, because the transport sent one either way.
+			wantTitle: "renamed", wantDescription: "the original description", wantStatus: domain.StatusInProgress,
+		},
+		{
+			name:      "an empty description clears it",
+			update:    domain.TaskUpdate{Description: ptr("")},
+			wantTitle: "the original title", wantDescription: "", wantStatus: domain.StatusInProgress,
+		},
+		{
+			name:      "whitespace is trimmed before it is stored",
+			update:    domain.TaskUpdate{Title: ptr("  padded  "), Description: ptr("  also padded  ")},
+			wantTitle: "padded", wantDescription: "also padded", wantStatus: domain.StatusInProgress,
+		},
+		{
+			name:      "status is set to exactly what was asked for",
+			update:    domain.TaskUpdate{Status: ptr(domain.StatusCompleted)},
+			wantTitle: "the original title", wantDescription: "the original description", wantStatus: domain.StatusCompleted,
+		},
+		{
+			name:   "an empty title is rejected rather than stored",
+			update: domain.TaskUpdate{Title: ptr("   ")}, wantErr: apperr.ErrValidation,
+		},
+		{
+			name:   "an unknown status is rejected",
+			update: domain.TaskUpdate{Status: ptr(domain.TaskStatus("done"))}, wantErr: apperr.ErrValidation,
+		},
+		{
+			name:   "an over-long title is rejected",
+			update: domain.TaskUpdate{Title: ptr(long)}, wantErr: apperr.ErrValidation,
+		},
+		{
+			name:   "an empty body is rejected",
+			update: domain.TaskUpdate{}, wantErr: apperr.ErrValidation,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			uc, repo := newTaskUseCaseForTest()
+			task, _ := repo.Create(ctx, domain.Task{
+				Title:       "the original title",
+				Description: "the original description",
+				Status:      domain.StatusInProgress,
+				CreatorID:   1,
+			})
+
+			updated, err := uc.Update(ctx, actor(1), task.ID, tc.update)
+
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Update() error = %v, want %v", err, tc.wantErr)
+				}
+				stored := repo.tasks[task.ID]
+				if stored.Title != task.Title || stored.Description != task.Description || stored.Status != task.Status {
+					t.Errorf("a rejected update still changed the task: %+v", stored)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Update() unexpected error: %v", err)
+			}
+			if updated.Title != tc.wantTitle {
+				t.Errorf("Title = %q, want %q", updated.Title, tc.wantTitle)
+			}
+			if updated.Description != tc.wantDescription {
+				t.Errorf("Description = %q, want %q", updated.Description, tc.wantDescription)
+			}
+			if updated.Status != tc.wantStatus {
+				t.Errorf("Status = %q, want %q", updated.Status, tc.wantStatus)
+			}
+		})
+	}
+}
+
+// What toggle-status cannot promise: the same call twice leaves the task
+// where the caller asked for it, so a retry after a lost response is safe.
+func TestTaskUseCase_Update_SettingAStatusIsIdempotent(t *testing.T) {
+	uc, repo := newTaskUseCaseForTest()
+	ctx := context.Background()
+	task, _ := repo.Create(ctx, domain.Task{Title: "t", Status: domain.StatusCreated, CreatorID: 1})
+
+	completed := domain.TaskUpdate{Status: ptr(domain.StatusCompleted)}
+	for attempt := 1; attempt <= 3; attempt++ {
+		updated, err := uc.Update(ctx, actor(1), task.ID, completed)
+		if err != nil {
+			t.Fatalf("attempt %d: %v", attempt, err)
+		}
+		if updated.Status != domain.StatusCompleted {
+			t.Fatalf("attempt %d: Status = %q, want %q", attempt, updated.Status, domain.StatusCompleted)
+		}
+	}
+
+	// The same three calls through ToggleStatus would end on in_progress.
+	if got := repo.tasks[task.ID].Status; got != domain.StatusCompleted {
+		t.Errorf("stored Status = %q, want %q", got, domain.StatusCompleted)
+	}
+}
+
 func TestTaskUseCase_Delete_OwnershipEnforced(t *testing.T) {
 	uc, repo := newTaskUseCaseForTest()
 	owned, _ := repo.Create(context.Background(), domain.Task{Title: "mine", CreatorID: 1})
 
-	if err := uc.Delete(context.Background(), 2, owned.ID); !errors.Is(err, apperr.ErrNotFound) {
+	if err := uc.Delete(context.Background(), actor(2), owned.ID); !errors.Is(err, apperr.ErrNotFound) {
 		t.Errorf("Delete() by a different user error = %v, want apperr.ErrNotFound", err)
 	}
 	if _, ok := repo.tasks[owned.ID]; !ok {
 		t.Error("Delete() by a non-owner must not remove the task")
 	}
 
-	if err := uc.Delete(context.Background(), 1, owned.ID); err != nil {
+	if err := uc.Delete(context.Background(), actor(1), owned.ID); err != nil {
 		t.Fatalf("Delete() by the owner unexpected error: %v", err)
 	}
 	if _, ok := repo.tasks[owned.ID]; ok {
@@ -269,7 +401,7 @@ func TestTaskUseCase_ToggleStatus_Cycles(t *testing.T) {
 	}
 
 	for i, want := range wantSequence {
-		got, err := uc.ToggleStatus(context.Background(), 1, owned.ID)
+		got, err := uc.ToggleStatus(context.Background(), actor(1), owned.ID)
 		if err != nil {
 			t.Fatalf("ToggleStatus() call #%d unexpected error: %v", i+1, err)
 		}
@@ -283,7 +415,7 @@ func TestTaskUseCase_ToggleStatus_OwnershipEnforced(t *testing.T) {
 	uc, repo := newTaskUseCaseForTest()
 	owned, _ := repo.Create(context.Background(), domain.Task{Title: "mine", CreatorID: 1, Status: domain.StatusCreated})
 
-	if _, err := uc.ToggleStatus(context.Background(), 2, owned.ID); !errors.Is(err, apperr.ErrNotFound) {
+	if _, err := uc.ToggleStatus(context.Background(), actor(2), owned.ID); !errors.Is(err, apperr.ErrNotFound) {
 		t.Errorf("ToggleStatus() by a different user error = %v, want apperr.ErrNotFound", err)
 	}
 }
@@ -294,7 +426,7 @@ func TestTaskUseCase_List_ScopedToRequester(t *testing.T) {
 	repo.Create(context.Background(), domain.Task{Title: "user1-b", CreatorID: 1})
 	repo.Create(context.Background(), domain.Task{Title: "user2-a", CreatorID: 2})
 
-	page, err := uc.List(context.Background(), 1, domain.TaskFilter{})
+	page, err := uc.List(context.Background(), actor(1), domain.TaskFilter{})
 	if err != nil {
 		t.Fatalf("List() unexpected error: %v", err)
 	}
@@ -333,7 +465,7 @@ func TestTaskUseCase_Create_CountsCharactersNotBytes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			uc, _ := newTaskUseCaseForTest()
 
-			task, err := uc.Create(context.Background(), 1, tt.title, tt.description)
+			task, err := uc.Create(context.Background(), actor(1), tt.title, tt.description)
 			if tt.wantErr {
 				if !errors.Is(err, apperr.ErrValidation) {
 					t.Errorf("Create() with %d characters error = %v, want apperr.ErrValidation",
@@ -372,7 +504,7 @@ func TestTaskUseCase_ToggleStatus_RetriesAfterConcurrentChange(t *testing.T) {
 		repo.tasks[owned.ID] = task
 	}
 
-	got, err := uc.ToggleStatus(context.Background(), 1, owned.ID)
+	got, err := uc.ToggleStatus(context.Background(), actor(1), owned.ID)
 	if err != nil {
 		t.Fatalf("ToggleStatus() unexpected error: %v", err)
 	}
@@ -403,7 +535,7 @@ func TestTaskUseCase_ToggleStatus_ForeignTaskStaysNotFound(t *testing.T) {
 	uc, repo := newTaskUseCaseForTest()
 	owned, _ := repo.Create(context.Background(), domain.Task{Title: "mine", CreatorID: 1, Status: domain.StatusCreated})
 
-	if _, err := uc.ToggleStatus(context.Background(), 2, owned.ID); !errors.Is(err, apperr.ErrNotFound) {
+	if _, err := uc.ToggleStatus(context.Background(), actor(2), owned.ID); !errors.Is(err, apperr.ErrNotFound) {
 		t.Errorf("ToggleStatus() by a different user error = %v, want apperr.ErrNotFound", err)
 	}
 	if repo.tasks[owned.ID].Status != domain.StatusCreated {
@@ -433,7 +565,7 @@ func TestTaskUseCase_List_AppliesPaginationDefaultsAndLimits(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			page, err := uc.List(context.Background(), 1, domain.TaskFilter{Page: tt.request})
+			page, err := uc.List(context.Background(), actor(1), domain.TaskFilter{Page: tt.request})
 			if err != nil {
 				t.Fatalf("List() unexpected error: %v", err)
 			}
@@ -457,7 +589,7 @@ func TestTaskUseCase_List_FiltersByStatus(t *testing.T) {
 	repo.Create(context.Background(), domain.Task{Title: "c", CreatorID: 1, Status: domain.StatusInProgress})
 
 	inProgress := domain.StatusInProgress
-	page, err := uc.List(context.Background(), 1, domain.TaskFilter{Status: &inProgress})
+	page, err := uc.List(context.Background(), actor(1), domain.TaskFilter{Status: &inProgress})
 	if err != nil {
 		t.Fatalf("List() unexpected error: %v", err)
 	}
@@ -475,7 +607,7 @@ func TestTaskUseCase_List_RejectsUnknownStatus(t *testing.T) {
 	uc, _ := newTaskUseCaseForTest()
 
 	unknown := domain.TaskStatus("archived")
-	_, err := uc.List(context.Background(), 1, domain.TaskFilter{Status: &unknown})
+	_, err := uc.List(context.Background(), actor(1), domain.TaskFilter{Status: &unknown})
 	if !errors.Is(err, apperr.ErrValidation) {
 		t.Errorf("List() with an unknown status error = %v, want apperr.ErrValidation", err)
 	}
@@ -488,7 +620,7 @@ func TestTaskUseCase_List_StaysScopedToRequesterWhenPaginated(t *testing.T) {
 		repo.Create(context.Background(), domain.Task{Title: "theirs", CreatorID: 2, Status: domain.StatusCreated})
 	}
 
-	page, err := uc.List(context.Background(), 1, domain.TaskFilter{Page: domain.PageRequest{Limit: 100}})
+	page, err := uc.List(context.Background(), actor(1), domain.TaskFilter{Page: domain.PageRequest{Limit: 100}})
 	if err != nil {
 		t.Fatalf("List() unexpected error: %v", err)
 	}
