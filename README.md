@@ -51,9 +51,12 @@ the security and correctness choices behind the auth and ownership checks.
 - An optional Prometheus + Grafana stack in the same compose file (behind a
   profile), with a provisioned dashboard.
 - A central HTTP error handler: every domain error maps to a specific status
-  code (404/409/400/401/403), and only that error's message ever reaches the
-  client - anything unexpected is logged in full server-side and returned to
-  the client as a bare `500`.
+  code (404/409/400/401/403) and to a stable machine-readable `code`, and only
+  that error's message ever reaches the client - anything unexpected is logged
+  in full server-side and returned to the client as a bare `500`.
+- `PATCH /tasks/{id}` is a true partial update: an absent property keeps its
+  value, a present one is written, and the status can be set outright, so a
+  retried request does not move the task a second time.
 - `context`-based timeouts on every database call, independent of whatever
   deadline the incoming request's context already carries.
 - Database migrations (`golang-migrate`), run automatically on startup.
@@ -73,10 +76,10 @@ cmd/
               (the migration targets) connects exactly the way it does
 
 internal/
-  domain/         entities + repository/service interfaces (no framework imports)
+  domain/         entities and value types (no framework imports)
   usecase/        business rules: validation, ownership checks, context timeouts
   repository/
-    postgres/     pgx-backed implementations of the domain repository interfaces
+    postgres/     pgx-backed implementations of consumer-owned repository interfaces
   auth/
     password/     bcrypt hashing/verification
     token/        JWT issuing/verification
@@ -117,6 +120,9 @@ cases and handlers with in-memory fakes instead of a real database (see the
 `*_test.go` files throughout).
 
 ## Quick start (Docker)
+
+Requires Docker Compose and Go 1.24+ (the development command wrapper loads
+`.env` with the same semantics as the server).
 
 ```bash
 cp .env.example .env
@@ -193,6 +199,53 @@ curl localhost:8080/api/v1/tasks \
 ```
 
 Full request/response shapes are in [`docs/openapi.yaml`](docs/openapi.yaml).
+
+### Editing a task
+
+`PATCH /api/v1/tasks/{id}` writes only the properties the body contains:
+
+```bash
+# renames, and leaves the description exactly as it was
+curl -X PATCH localhost:8080/api/v1/tasks/1 -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <token>' -d '{"title":"New title"}'
+
+# clears the description; an empty title would be rejected instead
+curl -X PATCH localhost:8080/api/v1/tasks/1 -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <token>' -d '{"description":""}'
+
+# sets the status outright, so sending it twice changes nothing the second time
+curl -X PATCH localhost:8080/api/v1/tasks/1 -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <token>' -d '{"status":"completed"}'
+```
+
+An absent property keeps its value, a present one is written, and `null`
+counts as absent. The update is one statement with no read first, so two
+clients editing different properties of the same task both keep their change.
+`POST /api/v1/tasks/{id}/toggle-status` still cycles
+`created -> in_progress -> completed -> created`, but it is relative: a retry
+after a lost response moves the task again. Prefer `PATCH` with an explicit
+status wherever a request may be retried.
+
+### Error responses
+
+Every failure - including the rate limiter's `429` and an unknown route -
+answers with the same envelope:
+
+```json
+{
+  "code": "validation_error",
+  "message": "request body is invalid",
+  "request_id": "0f1c...",
+  "fields": [{ "field": "title", "message": "failed 'required' validation" }]
+}
+```
+
+`code` is the contract and is safe to branch on: `validation_error`,
+`bad_request`, `not_found`, `conflict`, `unauthorized`, `invalid_credentials`,
+`forbidden`, `method_not_allowed`, `rate_limited`, `internal_error`. `message`
+is written for people and may be reworded at any time. `fields` appears only
+when individual fields were rejected. `request_id` matches the
+`X-Request-ID` header and the server's log line for the same request.
 
 ## Configuration
 
@@ -589,3 +642,38 @@ a distributed system, but worth knowing about:
 ## License
 
 MIT - see [LICENSE](LICENSE).
+
+## Application boundaries and configuration semantics
+
+User profile operations receive authenticated `domain.Claims` explicitly.
+`UserUseCase` enforces self-or-admin access and admin-only listing before
+validation or repository access. Claims must come from a trusted authenticator,
+never from request JSON. HTTP handlers only extract claims, parse input and
+format results. Repository contracts live with their consumers in `usecase`;
+HTTP service contracts live in `handler`. Authentication reads only the user
+methods it needs; cleanup depends only on expired-session deletion.
+
+Handlers and authentication middleware pass `c.UserContext()` to application
+code. Parent values, deadlines and cancellation are preserved when use cases
+add their own timeout. This does not promise cancellation on a disconnected
+Fiber client.
+
+YAML is decoded into a typed schema with `yaml.v3` and strict known-field
+checking. Unknown/duplicate fields, invalid types and extra YAML documents
+are rejected. Effective settings retain the priority **YAML < .env < non-empty
+process environment**; empty environment overrides retain the lower-priority
+value for compatibility with Compose. Secrets are not YAML fields.
+
+`.env` uses literal `KEY=value` entries, one per line. Matching outer single
+or double quotes are removed; `$`, backticks, backslashes, spaces inside quotes,
+and `#` inside values are literal. There is no interpolation or shell execution.
+Only whole-line comments are supported. Duplicate keys, invalid assignments
+and unmatched opening quotes are errors. Use environment variables for multiline
+values. Put comments on separate lines and do not use `export KEY=...` syntax.
+
+Make's Docker commands and the smoke script use `go run ./cmd/envexec` to load
+this same format; neither Make nor Bash sources `.env`. Compose is passed
+`--env-file /dev/null` so it consumes the resolved process environment instead
+of parsing `.env` again. Use the Make targets, or prefix a direct Compose call
+with `go run ./cmd/envexec docker compose --env-file /dev/null ...`.
+The smoke script therefore also requires Go 1.24+.

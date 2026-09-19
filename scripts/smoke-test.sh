@@ -9,7 +9,7 @@
 #   scripts/smoke-test.sh --no-up    # skip `docker compose up`, just verify
 #                                     # against whatever is already running
 #
-# Requires: docker compose, curl, python3 (used for JSON parsing so the
+# Requires: Go 1.24+, docker compose, curl, python3 (used for JSON parsing so the
 # script doesn't depend on jq being installed).
 
 set -euo pipefail
@@ -36,8 +36,11 @@ if [[ ! -f "$ENV_FILE" ]]; then
 	exit 1
 fi
 
-# shellcheck disable=SC1090
-set -a && source "$ENV_FILE" && set +a
+# Load once with the same literal parser as the application; never source secrets.
+if [[ "${TODO_ENV_LOADED:-}" != "1" ]]; then
+ cd "$ROOT_DIR"
+ exec go run ./cmd/envexec env TODO_ENV_LOADED=1 bash "$ROOT_DIR/scripts/smoke-test.sh" "$@"
+fi
 
 SERVER_PORT="${SERVER_PORT:-8080}"
 DB_PORT="${DB_PORT:-5432}"
@@ -81,7 +84,7 @@ print(value)
 }
 
 compose() {
-	docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"
+	docker compose -f "$COMPOSE_FILE" --env-file /dev/null "$@"
 }
 
 cleanup() {
@@ -288,12 +291,77 @@ else
 	fail "the edit did not persist (API title: $(cat "$WORK_DIR/reread.json" 2>/dev/null), db title: '${db_title}')"
 fi
 
+step "A PATCH that sends only a title leaves the description alone"
+# The bug this guards: a title-only edit used to blank the description,
+# because the request struct always carried one.
+kept_status=$(curl -fsS -o "$WORK_DIR/partial.json" -w '%{http_code}' \
+	-X PATCH "${BASE_URL}/api/v1/tasks/${TASK_ID}" \
+	-H "Authorization: Bearer ${TOKEN}" \
+	-H 'Content-Type: application/json' \
+	-d "{\"title\":\"${NEW_TITLE} (partial)\"}") || true
+db_description="$(compose exec -T db psql -U "$DB_USER" -d "$DB_NAME" -tA -c \
+	"SELECT description FROM tasks WHERE id = ${TASK_ID};")"
+if [[ "$kept_status" == "200" ]] && [[ "$db_description" == "edited by scripts/smoke-test.sh" ]]; then
+	pass "the description survived a title-only edit"
+else
+	fail "HTTP ${kept_status}, the stored description is now '${db_description}'"
+fi
+
+step "An empty description clears it, an empty title does not"
+cleared_status=$(curl -fsS -o "$WORK_DIR/cleared.json" -w '%{http_code}' \
+	-X PATCH "${BASE_URL}/api/v1/tasks/${TASK_ID}" \
+	-H "Authorization: Bearer ${TOKEN}" \
+	-H 'Content-Type: application/json' \
+	-d '{"description":""}') || true
+db_description="$(compose exec -T db psql -U "$DB_USER" -d "$DB_NAME" -tA -c \
+	"SELECT description FROM tasks WHERE id = ${TASK_ID};")"
+if [[ "$cleared_status" == "200" ]] && [[ -z "$db_description" ]]; then
+	pass "an empty description cleared the column"
+else
+	fail "HTTP ${cleared_status}, the stored description is '${db_description}'"
+fi
+
+empty_title_status=$(curl -s -o "$WORK_DIR/empty-title.json" -w '%{http_code}' \
+	-X PATCH "${BASE_URL}/api/v1/tasks/${TASK_ID}" \
+	-H "Authorization: Bearer ${TOKEN}" \
+	-H 'Content-Type: application/json' \
+	-d '{"title":"   "}')
+if [[ "$empty_title_status" == "400" ]] &&
+	[[ "$(json_get "$(cat "$WORK_DIR/empty-title.json")" code)" == "validation_error" ]]; then
+	pass "an empty title is rejected with code validation_error"
+else
+	fail "HTTP ${empty_title_status}: $(cat "$WORK_DIR/empty-title.json" 2>/dev/null)"
+fi
+
+step "Setting a status through PATCH is safe to repeat"
+# Whatever a retry after a lost response would do, it must not move the task
+# a second time - which is exactly what toggle-status would do.
+for attempt in 1 2; do
+	set_status=$(curl -fsS -o "$WORK_DIR/set-status.json" -w '%{http_code}' \
+		-X PATCH "${BASE_URL}/api/v1/tasks/${TASK_ID}" \
+		-H "Authorization: Bearer ${TOKEN}" \
+		-H 'Content-Type: application/json' \
+		-d '{"status":"completed"}') || true
+	if [[ "$set_status" != "200" ]]; then
+		fail "attempt ${attempt} returned HTTP ${set_status}: $(cat "$WORK_DIR/set-status.json" 2>/dev/null)"
+		break
+	fi
+done
+db_task_status="$(compose exec -T db psql -U "$DB_USER" -d "$DB_NAME" -tA -c \
+	"SELECT status FROM tasks WHERE id = ${TASK_ID};")"
+if [[ "$db_task_status" == "completed" ]]; then
+	pass "two identical requests left the task completed, not one step further"
+else
+	fail "after repeating the same request the status is '${db_task_status}', want completed"
+fi
+
 step "Toggling task status via POST /api/v1/tasks/${TASK_ID}/toggle-status"
 toggle_status=$(curl -fsS -o "$WORK_DIR/toggle.json" -w '%{http_code}' \
 	-X POST "${BASE_URL}/api/v1/tasks/${TASK_ID}/toggle-status" \
 	-H "Authorization: Bearer ${TOKEN}") || true
-if [[ "$toggle_status" == "200" ]] && grep -q '"status":"in_progress"' "$WORK_DIR/toggle.json"; then
-	pass "status moved created -> in_progress"
+# The task was left completed by the step above, and the cycle wraps round.
+if [[ "$toggle_status" == "200" ]] && grep -q '"status":"created"' "$WORK_DIR/toggle.json"; then
+	pass "status moved completed -> created"
 else
 	fail "toggle-status returned HTTP ${toggle_status}: $(cat "$WORK_DIR/toggle.json" 2>/dev/null)"
 fi

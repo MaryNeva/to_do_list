@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -329,20 +330,20 @@ func (contractAuth) ValidateToken(context.Context, string) (domain.Claims, error
 
 type contractTasks struct{}
 
-func (contractTasks) Create(context.Context, int64, string, string) (domain.Task, error) {
+func (contractTasks) Create(context.Context, domain.Claims, string, string) (domain.Task, error) {
 	return sampleTask(), nil
 }
-func (contractTasks) Get(context.Context, int64, int64) (domain.Task, error) {
+func (contractTasks) Get(context.Context, domain.Claims, int64) (domain.Task, error) {
 	return sampleTask(), nil
 }
-func (contractTasks) List(context.Context, int64, domain.TaskFilter) (domain.Page[domain.Task], error) {
+func (contractTasks) List(context.Context, domain.Claims, domain.TaskFilter) (domain.Page[domain.Task], error) {
 	return domain.NewPage([]domain.Task{sampleTask()}, 1, domain.PageRequest{Limit: 20, Offset: 0}), nil
 }
-func (contractTasks) Update(context.Context, int64, int64, string, string) (domain.Task, error) {
+func (contractTasks) Update(context.Context, domain.Claims, int64, domain.TaskUpdate) (domain.Task, error) {
 	return sampleTask(), nil
 }
-func (contractTasks) Delete(context.Context, int64, int64) error { return nil }
-func (contractTasks) ToggleStatus(context.Context, int64, int64) (domain.Task, error) {
+func (contractTasks) Delete(context.Context, domain.Claims, int64) error { return nil }
+func (contractTasks) ToggleStatus(context.Context, domain.Claims, int64) (domain.Task, error) {
 	task := sampleTask()
 	task.Status = domain.StatusInProgress
 	return task, nil
@@ -350,19 +351,22 @@ func (contractTasks) ToggleStatus(context.Context, int64, int64) (domain.Task, e
 
 type contractUsers struct{}
 
-func (contractUsers) Get(context.Context, int64) (domain.User, error) { return sampleUser(), nil }
-func (contractUsers) List(context.Context, domain.PageRequest) (domain.Page[domain.User], error) {
-	return domain.NewPage([]domain.User{sampleUser()}, 1, domain.PageRequest{Limit: 20, Offset: 0}), nil
-}
-func (contractUsers) Update(context.Context, int64, string, string, string) (domain.User, error) {
+func (contractUsers) Get(context.Context, domain.Claims, int64) (domain.User, error) {
 	return sampleUser(), nil
 }
-func (contractUsers) Delete(context.Context, int64) error { return nil }
+func (contractUsers) List(context.Context, domain.Claims, domain.PageRequest) (domain.Page[domain.User], error) {
+	return domain.NewPage([]domain.User{sampleUser()}, 1, domain.PageRequest{Limit: 20, Offset: 0}), nil
+}
+func (contractUsers) Update(context.Context, domain.Claims, int64, string, string, string) (domain.User, error) {
+	return sampleUser(), nil
+}
+func (contractUsers) Delete(context.Context, domain.Claims, int64) error { return nil }
 
 func contractApp(t *testing.T) *fiber.App {
 	t.Helper()
 
 	return New(
+		context.Background(),
 		Config{
 			AppName:                  "to-do-list-contract",
 			ReadTimeout:              time.Second,
@@ -474,6 +478,7 @@ func TestOpenAPI_ErrorResponsesMatchTheDocument(t *testing.T) {
 	spec := loadSpec(t)
 
 	app := New(
+		context.Background(),
 		Config{
 			AppName: "to-do-list-contract", ReadTimeout: time.Second, WriteTimeout: time.Second,
 			CORSAllowOrigins: "*", CORSAllowMethods: "GET", CORSAllowHeaders: "Content-Type",
@@ -507,6 +512,87 @@ func TestOpenAPI_ErrorResponsesMatchTheDocument(t *testing.T) {
 	schema := spec.schemaFor(t, "/tasks", fiber.MethodGet, "401")
 	for _, problem := range spec.validate(t, "error response", schema, body) {
 		t.Error(problem)
+	}
+}
+
+// The code is what a client branches on, so it is checked against the
+// document's own list rather than against whatever the handler happens to
+// send today.
+func TestOpenAPI_ErrorCodesAreTheDocumentedOnes(t *testing.T) {
+	spec := loadSpec(t)
+	app := contractApp(t)
+
+	for _, tc := range []struct {
+		name       string
+		method     string
+		url        string
+		body       string
+		specPath   string
+		status     string
+		wantCode   string
+		wantFields []string
+	}{
+		{
+			name: "missing required field", method: fiber.MethodPost, url: "/api/v1/tasks", body: `{}`,
+			specPath: "/tasks", status: "400", wantCode: "validation_error", wantFields: []string{"title"},
+		},
+		{
+			name: "unparseable path parameter", method: fiber.MethodGet, url: "/api/v1/tasks/not-a-number",
+			specPath: "/tasks/{id}", status: "400", wantCode: "validation_error",
+		},
+		{
+			name: "unknown route", method: fiber.MethodGet, url: "/api/v1/nothing-here",
+			specPath: "/tasks/{id}", status: "404", wantCode: "not_found",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.url, strings.NewReader(tc.body))
+			req.Header.Set(fiber.HeaderAuthorization, "Bearer contract-test-token")
+			if tc.body != "" {
+				req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+			}
+
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			defer resp.Body.Close()
+
+			raw, _ := io.ReadAll(resp.Body)
+
+			var body any
+			if err := json.Unmarshal(raw, &body); err != nil {
+				t.Fatalf("error response is not JSON: %v (%s)", err, raw)
+			}
+			for _, problem := range spec.validate(t, "error response", spec.schemaFor(t, tc.specPath, tc.method, tc.status), body) {
+				t.Error(problem)
+			}
+
+			var envelope struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+				Fields  []struct {
+					Field string `json:"field"`
+				} `json:"fields"`
+			}
+			if err := json.Unmarshal(raw, &envelope); err != nil {
+				t.Fatalf("not an error envelope: %v (%s)", err, raw)
+			}
+			if envelope.Code != tc.wantCode {
+				t.Errorf("code = %q, want %q (%s)", envelope.Code, tc.wantCode, raw)
+			}
+			if envelope.Message == "" {
+				t.Errorf("the envelope carries no message: %s", raw)
+			}
+
+			var got []string
+			for _, f := range envelope.Fields {
+				got = append(got, f.Field)
+			}
+			if !slices.Equal(got, tc.wantFields) {
+				t.Errorf("fields = %v, want %v (%s)", got, tc.wantFields, raw)
+			}
+		})
 	}
 }
 

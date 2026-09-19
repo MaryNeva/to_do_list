@@ -1,5 +1,4 @@
--include .env
-export
+ENVEXEC := go run ./cmd/envexec
 
 BINARY := bin/server
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -21,7 +20,7 @@ MIGRATE := go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrat
 # a password containing @ : or / is escaped identically in both. Set
 # DATABASE_URL to point them at a different database.
 DATABASE_URL ?=
-DSN = $(if $(DATABASE_URL),$(DATABASE_URL),$$(go run ./cmd/dsn))
+export DATABASE_URL
 
 .PHONY: run build verify test test-integration test-contract cover lint fmt vet tidy \
         migrate-up migrate-down migrate-create migrate-verify \
@@ -44,7 +43,7 @@ test: ## Run unit tests (no database required)
 	go test -mod=readonly -race -cover ./...
 
 test-integration: ## Run Postgres integration tests (needs TEST_DATABASE_URL)
-	go test -mod=readonly -race -tags=integration ./internal/repository/postgres/...
+	$(ENVEXEC) go test -mod=readonly -race -tags=integration ./internal/repository/postgres/...
 
 test-contract: ## Check real HTTP responses against docs/openapi.yaml
 	go test -mod=readonly -count=1 ./internal/transport/httpserver/ -run TestOpenAPI -v
@@ -68,40 +67,40 @@ tidy: ## Tidy go.mod/go.sum (needs network access)
 # The recipes are silenced with @ so the resolved DSN, which carries the
 # database password, is never echoed into a build log.
 migrate-up: ## Apply all pending migrations
-	@$(MIGRATE) -path $(MIGRATIONS_DIR) -database "$(DSN)" up
+	@$(ENVEXEC) sh -c '$(MIGRATE) -path $(MIGRATIONS_DIR) -database "$${DATABASE_URL:-$$(go run ./cmd/dsn)}" up'
 
 migrate-down: ## Roll back the most recent migration
-	@$(MIGRATE) -path $(MIGRATIONS_DIR) -database "$(DSN)" down 1
+	@$(ENVEXEC) sh -c '$(MIGRATE) -path $(MIGRATIONS_DIR) -database "$${DATABASE_URL:-$$(go run ./cmd/dsn)}" down 1'
 
 migrate-create: ## Create a new migration pair: make migrate-create name=add_foo
 	$(MIGRATE) create -ext sql -dir $(MIGRATIONS_DIR) -seq $(name)
 
 migrate-verify: ## Run up -> down -> up against MIGRATE_VERIFY_URL (a throwaway database)
-	@./scripts/migrate-verify.sh
+	@$(ENVEXEC) ./scripts/migrate-verify.sh
 
 docker-up: ## Build and start the app + Postgres via docker compose
-	docker compose up --build -d
+	$(ENVEXEC) docker compose --env-file /dev/null up --build -d
 
 docker-down: ## Stop and remove the docker compose stack
-	docker compose down
+	$(ENVEXEC) docker compose --env-file /dev/null down
 
 docker-logs: ## Tail the app container's logs
-	docker compose logs -f app
+	$(ENVEXEC) docker compose --env-file /dev/null logs -f app
 
 observability-up: ## Start the stack together with Prometheus and Grafana
 	VERSION=$(VERSION) COMMIT=$(COMMIT) BUILD_DATE=$(BUILD_DATE) \
-		docker compose --profile observability up --build -d
-	@echo "Grafana:    http://localhost:$${GRAFANA_PORT:-3000}  (dashboard: to-do-list service)"
-	@echo "Prometheus: http://localhost:$${PROMETHEUS_PORT:-9090}"
+		$(ENVEXEC) docker compose --env-file /dev/null --profile observability up --build -d
+	@$(ENVEXEC) sh -c 'echo "Grafana:    http://localhost:$${GRAFANA_PORT:-3000}  (dashboard: to-do-list service)"'
+	@$(ENVEXEC) sh -c 'echo "Prometheus: http://localhost:$${PROMETHEUS_PORT:-9090}"'
 
 observability-down: ## Stop the stack including Prometheus and Grafana
-	docker compose --profile observability down
+	$(ENVEXEC) docker compose --env-file /dev/null --profile observability down
 
 metrics: ## Print the metrics the running service currently exposes
-	@curl -s http://localhost:$${SERVER_PORT:-8080}/metrics | grep -E '^todo_' | grep -v '_bucket{'
+	@$(ENVEXEC) sh -c 'curl -s http://localhost:$${SERVER_PORT:-8080}/metrics | grep -E "^todo_" | grep -v "_bucket{"'
 
 gen-admin-hash: ## Hash a password for ADMIN_PASSWORD_HASH: make gen-admin-hash pass='...'
-	@go run ./cmd/hashpw $(pass)
+	@$(ENVEXEC) go run ./cmd/hashpw $(pass)
 
 smoke-test: ## Start the full stack (db + migrations + app) and verify register/login/task CRUD against real Postgres
 	@./scripts/smoke-test.sh

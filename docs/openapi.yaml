@@ -169,11 +169,17 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Task' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
     patch:
       tags: [tasks]
       summary: Update one of the caller's own tasks
+      description: >-
+        Only the properties present in the body are written, so a client that
+        sends a title cannot erase a description someone else just changed.
+        Setting status here is absolute and safe to retry, unlike
+        POST /tasks/{id}/toggle-status.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -195,6 +201,7 @@ paths:
       security: [{ bearerAuth: [] }]
       responses:
         '204': { description: Deleted }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
 
@@ -204,6 +211,9 @@ paths:
     post:
       tags: [tasks]
       summary: Cycle status created -> in_progress -> completed -> created
+      description: >-
+        Relative, so a retry after a lost response advances the task a second
+        time. Use PATCH /tasks/{id} with an explicit status when that matters.
       security: [{ bearerAuth: [] }]
       responses:
         '200':
@@ -211,6 +221,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Task' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
 
@@ -245,6 +256,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -273,6 +285,7 @@ paths:
       security: [{ bearerAuth: [] }]
       responses:
         '204': { description: Deleted }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -492,9 +505,35 @@ components:
 
     Error:
       type: object
+      required: [code, message]
       properties:
-        error: { type: string }
+        code:
+          type: string
+          description: >-
+            The stable identifier of the failure. Branch on this; the message
+            is written for people and may be reworded at any time.
+          enum:
+            - validation_error
+            - bad_request
+            - not_found
+            - conflict
+            - unauthorized
+            - invalid_credentials
+            - forbidden
+            - method_not_allowed
+            - rate_limited
+            - internal_error
+        message: { type: string }
         request_id: { type: string }
+        fields:
+          type: array
+          description: Which fields were rejected. Sent with validation_error only.
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string }
+              message: { type: string }
 
     RegisterRequest:
       type: object
@@ -575,11 +614,28 @@ components:
 
     UpdateTaskRequest:
       type: object
-      required: [title]
+      minProperties: 1
+      description: >-
+        A partial edit. Every property is optional and only the ones present
+        are written; a property sent as null counts as absent. An empty
+        description clears it, an empty title is rejected.
       properties:
         # Lengths are counted in Unicode characters, not bytes.
-        title: { type: string, minLength: 1, maxLength: 200 }
-        description: { type: string, maxLength: 4000 }
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Present and non-empty to rename; absent to keep the current title.
+        description:
+          type: string
+          maxLength: 4000
+          description: Present to overwrite, "" to clear, absent to keep.
+        status:
+          type: string
+          enum: [created, in_progress, completed]
+          description: >-
+            The status the task should end up in. Absolute, not relative, so
+            repeating the same request leaves the task where it already is.
 
     Task:
       type: object
