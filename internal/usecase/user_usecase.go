@@ -25,27 +25,31 @@ type UserConfig struct {
 }
 
 type UserUseCase struct {
-	repo    domain.UserRepository
+	repo    UserRepository
 	hasher  *password.Hasher
 	cfg     UserConfig
 	logger  *slog.Logger
 	metrics MetricsRecorder
 }
 
-func NewUserUseCase(repo domain.UserRepository, hasher *password.Hasher, cfg UserConfig, logger *slog.Logger, opts ...Option) *UserUseCase {
+func NewUserUseCase(repo UserRepository, hasher *password.Hasher, cfg UserConfig, logger *slog.Logger, opts ...Option) *UserUseCase {
 	resolved := applyOptions(opts)
 	return &UserUseCase{repo: repo, hasher: hasher, cfg: cfg, logger: logger, metrics: resolved.metrics}
 }
 
-var _ domain.UserService = (*UserUseCase)(nil)
-
-func (uc *UserUseCase) Get(ctx context.Context, id int64) (domain.User, error) {
+func (uc *UserUseCase) Get(ctx context.Context, actor domain.Claims, id int64) (domain.User, error) {
+	if err := authorizeUser(actor, id, false); err != nil {
+		return domain.User{}, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 	return uc.repo.GetByID(ctx, id)
 }
 
-func (uc *UserUseCase) List(ctx context.Context, page domain.PageRequest) (domain.Page[domain.User], error) {
+func (uc *UserUseCase) List(ctx context.Context, actor domain.Claims, page domain.PageRequest) (domain.Page[domain.User], error) {
+	if err := authorizeUser(actor, 0, true); err != nil {
+		return domain.Page[domain.User]{}, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
@@ -59,7 +63,10 @@ func (uc *UserUseCase) List(ctx context.Context, page domain.PageRequest) (domai
 	return users, nil
 }
 
-func (uc *UserUseCase) Update(ctx context.Context, id int64, username, email, newPassword string) (domain.User, error) {
+func (uc *UserUseCase) Update(ctx context.Context, actor domain.Claims, id int64, username, email, newPassword string) (domain.User, error) {
+	if err := authorizeUser(actor, id, false); err != nil {
+		return domain.User{}, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
@@ -119,7 +126,10 @@ func (uc *UserUseCase) update(ctx context.Context, id int64, fields domain.UserU
 	return updated, nil
 }
 
-func (uc *UserUseCase) Delete(ctx context.Context, id int64) error {
+func (uc *UserUseCase) Delete(ctx context.Context, actor domain.Claims, id int64) error {
+	if err := authorizeUser(actor, id, false); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 	if err := uc.repo.Delete(ctx, id); err != nil {
@@ -174,4 +184,18 @@ func clampPage(page domain.PageRequest, defaultSize, maxSize int) domain.PageReq
 		page.Offset = 0
 	}
 	return page
+}
+
+// actor must originate from a trusted authenticator, never from request JSON.
+func authorizeUser(actor domain.Claims, targetID int64, adminOnly bool) error {
+	if actor.UserID < 0 || (actor.UserID == 0 && !actor.IsAdmin) {
+		return apperr.ErrUnauthorized
+	}
+	if actor.IsAdmin {
+		return nil
+	}
+	if !adminOnly && targetID > 0 && actor.UserID == targetID {
+		return nil
+	}
+	return apperr.ErrForbidden
 }

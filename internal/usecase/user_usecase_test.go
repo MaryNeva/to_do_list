@@ -173,7 +173,7 @@ func TestUserUseCase_Update_DoesNotRehashUnchangedPassword(t *testing.T) {
 		t.Fatalf("seed Create() unexpected error: %v", err)
 	}
 
-	updated, err := uc.Update(context.Background(), created.ID, "", "alice@new-domain.com", "")
+	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, "", "alice@new-domain.com", "")
 	if err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestUserUseCase_Update_ChangesPasswordWhenProvided(t *testing.T) {
 	hash, _ := testHasher(t).Hash("original-password")
 	created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
 
-	updated, err := uc.Update(context.Background(), created.ID, "", "", "new-password")
+	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, "", "", "new-password")
 	if err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestUserUseCase_Update_PartialFieldsLeaveOthersUnchanged(t *testing.T) {
 	uc, repo := newUserUseCaseForTest(t)
 	created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: "hash"})
 
-	updated, err := uc.Update(context.Background(), created.ID, "alice2", "", "")
+	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, "alice2", "", "")
 	if err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestUserUseCase_Update_PartialFieldsLeaveOthersUnchanged(t *testing.T) {
 
 func TestUserUseCase_Get_NotFound(t *testing.T) {
 	uc, _ := newUserUseCaseForTest(t)
-	if _, err := uc.Get(context.Background(), 123); err == nil {
+	if _, err := uc.Get(context.Background(), domain.Claims{IsAdmin: true}, 123); err == nil {
 		t.Error("Get() for a missing user should return an error")
 	}
 }
@@ -245,7 +245,7 @@ func TestUserUseCase_Update_EnforcesConfiguredLengthPolicy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := uc.Update(context.Background(), created.ID, tt.username, "", tt.newPassword)
+			_, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, tt.username, "", tt.newPassword)
 			if !errors.Is(err, apperr.ErrValidation) {
 				t.Errorf("Update() error = %v, want apperr.ErrValidation", err)
 			}
@@ -263,7 +263,7 @@ func TestUserUseCase_Update_RejectsRenameToReservedAdminName(t *testing.T) {
 
 	for _, name := range []string{"admin", "Admin", "  ADMIN  "} {
 		t.Run(name, func(t *testing.T) {
-			_, err := uc.Update(context.Background(), created.ID, name, "", "")
+			_, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, name, "", "")
 			if !errors.Is(err, apperr.ErrConflict) {
 				t.Errorf("Update(%q) error = %v, want apperr.ErrConflict", name, err)
 			}
@@ -279,7 +279,7 @@ func TestUserUseCase_Update_RenameAllowedWithoutBootstrapAdmin(t *testing.T) {
 	uc, repo := newUserUseCaseForTest(t) // testUserConfig leaves AdminUsername empty
 	created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: "h"})
 
-	updated, err := uc.Update(context.Background(), created.ID, "admin", "", "")
+	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, "admin", "", "")
 	if err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestUserUseCase_Update_OnlySuppliedFieldsAreSent(t *testing.T) {
 	uc := NewUserUseCase(repo, testHasher(t), testUserConfig(), silentLogger())
 	created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: "h"})
 
-	if _, err := uc.Update(context.Background(), created.ID, "", "new@example.com", ""); err != nil {
+	if _, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, "", "new@example.com", ""); err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
 
@@ -337,7 +337,7 @@ func TestUserUseCase_Update_CountsCharactersNotBytes(t *testing.T) {
 			uc, repo := newUserUseCaseForTest(t)
 			created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: "h"})
 
-			_, err := uc.Update(context.Background(), created.ID, tt.username, "", "")
+			_, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, tt.username, "", "")
 			if tt.wantErr {
 				if !errors.Is(err, apperr.ErrValidation) {
 					t.Errorf("Update(%d chars) error = %v, want apperr.ErrValidation", utf8.RuneCountInString(tt.username), err)
