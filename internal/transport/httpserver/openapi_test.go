@@ -159,9 +159,7 @@ func (s *openAPI) flatten(t *testing.T, schema map[string]any) (props map[string
 			props[name] = sub
 		}
 	}
-	for _, name := range toStrings(schema["required"]) {
-		required = append(required, name)
-	}
+	required = append(required, toStrings(schema["required"])...)
 
 	return props, required, kind
 }

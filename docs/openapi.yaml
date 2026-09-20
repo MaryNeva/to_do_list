@@ -22,6 +22,7 @@ paths:
     post:
       tags: [auth]
       summary: Create a new user account
+      security: []
       requestBody:
         required: true
         content:
@@ -40,6 +41,7 @@ paths:
     post:
       tags: [auth]
       summary: Exchange credentials for a JWT access token
+      security: []
       description: |
         Answers 401 for an unknown user or a wrong password, and also when the
         password is changed while this login is in flight: the session would
@@ -63,6 +65,7 @@ paths:
     post:
       tags: [auth]
       summary: Exchange a refresh token for a new pair
+      security: []
       description: |
         Rotates the session: the presented refresh token is consumed and a
         new one is issued together with a fresh access token. The exchange is
@@ -86,6 +89,7 @@ paths:
     post:
       tags: [auth]
       summary: Revoke a refresh token
+      security: []
       description: |
         Ends the session the refresh token belongs to. Already unknown or
         revoked tokens are accepted, since the requested state is reached
@@ -499,9 +503,10 @@ components:
         duration_ms:
           type: number
           format: double
-        error:
-          type: string
-          description: Present only when the check failed.
+      description: >-
+        The reason a check failed is deliberately absent: it names the host,
+        port, database and user the probe could not reach, and this endpoint
+        needs no credentials. It is written to the service log instead.
 
     Error:
       type: object
@@ -521,6 +526,7 @@ components:
             - invalid_credentials
             - forbidden
             - method_not_allowed
+            - payload_too_large
             - rate_limited
             - internal_error
         message: { type: string }

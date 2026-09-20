@@ -12,7 +12,9 @@ scrape_configs:
   - job_name: to-do-list
     metrics_path: /metrics
     static_configs:
-      - targets: ["app:8080"]
+      # The metrics listener (METRICS_ADDRESS in docker-compose.yml), not the
+      # published API port: /metrics is not served there.
+      - targets: ["app:9101"]
         labels:
           service: to-do-list
 

@@ -253,7 +253,7 @@ func TestUserUseCase_RecordsSessionRevocationOnPasswordChangeOnly(t *testing.T) 
 	}, silentLogger(), WithMetrics(metrics))
 
 	ctx := context.Background()
-	hash, err := hasher.Hash("password123")
+	hash, err := hasher.Hash(context.Background(), "password123")
 	if err != nil {
 		t.Fatalf("hash password: %v", err)
 	}
@@ -357,9 +357,11 @@ func TestAuthUseCase_ReuseCountsEverySessionItEnded(t *testing.T) {
 	}
 }
 
-// A revocation that failed ended nothing, so reporting sessions closed would
-// be a lie that hides the failure.
-func TestAuthUseCase_FailedRevocationAfterReuseRecordsNothing(t *testing.T) {
+// The revocation is part of the transaction that detects the replay, so it
+// cannot half-happen. If it fails, the whole rotation fails: the caller gets
+// an error rather than the ordinary 401 that would mean "handled", and
+// nothing is reported as revoked.
+func TestAuthUseCase_AReplayWhoseRevocationFailsIsNotReportedAsHandled(t *testing.T) {
 	metrics := newFakeMetrics()
 	uc, _, _, refresh := newAuthUseCaseWithRefresh(t, "", "", WithMetrics(metrics))
 	ctx := context.Background()
@@ -377,15 +379,22 @@ func TestAuthUseCase_FailedRevocationAfterReuseRecordsNothing(t *testing.T) {
 
 	refresh.revokeAllErr = errors.New("connection reset")
 
-	if _, err := uc.Refresh(ctx, tokens.RefreshToken); err == nil {
+	_, err = uc.Refresh(ctx, tokens.RefreshToken)
+	if err == nil {
 		t.Fatal("replaying a consumed token should fail")
+	}
+	// 401 is what a handled replay looks like; this one was not handled.
+	if errors.Is(err, apperr.ErrUnauthorized) {
+		t.Errorf("error = %v, want an internal failure rather than the ordinary rejection", err)
 	}
 
 	if got := metrics.count(metrics.revocationCalls, ReasonTokenReuse); got != 0 {
-		t.Errorf("a failed revocation touched the counter %d times, want 0", got)
+		t.Errorf("a failed revocation touched the revocation counter %d times, want 0", got)
 	}
-	// The replay itself is still reported, so the signal is not lost.
-	if got := metrics.count(metrics.rotation, OutcomeReuse); got != 1 {
-		t.Errorf("reuse rotations = %d, want 1", got)
+	if got := metrics.count(metrics.rotation, OutcomeReuse); got != 0 {
+		t.Errorf("rotation[reuse] = %d; nothing was successfully handled", got)
+	}
+	if got := metrics.count(metrics.rotation, OutcomeFailure); got != 1 {
+		t.Errorf("rotation[failure] = %d, want 1 - the failure has to show somewhere", got)
 	}
 }
