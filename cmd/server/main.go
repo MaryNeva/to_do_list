@@ -49,8 +49,11 @@ func main() {
 }
 
 func run(cfg config.Config, log *slog.Logger, build buildinfo.Info) error {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	requestCtx, abandonInFlight := context.WithCancel(context.Background())
+	defer abandonInFlight()
 
 	if cfg.RunMigrations {
 		log.Info("running database migrations", "path", cfg.MigrationsPath)
@@ -59,13 +62,23 @@ func run(cfg config.Config, log *slog.Logger, build buildinfo.Info) error {
 		}
 	}
 
-	pool, err := postgres.NewPool(ctx, cfg.DatabaseDSN(), cfg.DBConnectTimeout)
+	pool, err := postgres.NewPool(signalCtx, cfg.DatabaseDSN(), postgres.PoolConfig{
+		MaxConns:       int32(cfg.DBMaxConns),
+		MinConns:       int32(cfg.DBMinConns),
+		MaxConnLife:    cfg.DBMaxConnLife,
+		MaxConnIdle:    cfg.DBMaxConnIdle,
+		ConnectTimeout: cfg.DBConnectTimeout,
+	})
 	if err != nil {
 		return fmt.Errorf("connect to database: %w", err)
 	}
 	defer pool.Close()
 
-	log.Info("connected to the database")
+	log.Info("connected to the database",
+		"max_connections", cfg.DBMaxConns,
+		"min_connections", cfg.DBMinConns,
+		"max_conn_lifetime", cfg.DBMaxConnLife,
+	)
 
 	metrics := observability.New(cfg.MetricsNamespace, build)
 	metrics.Preload(knownMetricLabels())
@@ -82,7 +95,7 @@ func run(cfg config.Config, log *slog.Logger, build buildinfo.Info) error {
 		return fmt.Errorf("build token service: %w", err)
 	}
 
-	hasher, err := password.NewHasher(cfg.PasswordBcryptCost)
+	hasher, err := password.NewHasher(cfg.PasswordBcryptCost, cfg.PasswordMaxConcurrent)
 	if err != nil {
 		return fmt.Errorf("build password hasher: %w", err)
 	}
@@ -121,7 +134,7 @@ func run(cfg config.Config, log *slog.Logger, build buildinfo.Info) error {
 		Timeout:   cfg.DBCallTimeout,
 	}, log, usecase.WithMetrics(metrics))
 
-	cleanupCtx, stopCleanup := context.WithCancel(ctx)
+	cleanupCtx, stopCleanup := context.WithCancel(signalCtx)
 	var cleanupDone sync.WaitGroup
 	defer cleanupDone.Wait()
 	defer stopCleanup()
@@ -133,11 +146,14 @@ func run(cfg config.Config, log *slog.Logger, build buildinfo.Info) error {
 	}()
 
 	app := httpserver.New(
-		ctx,
+		requestCtx,
 		httpserver.Config{
 			AppName:                  cfg.AppName,
 			ReadTimeout:              cfg.ReadTimeout,
 			WriteTimeout:             cfg.WriteTimeout,
+			MaxBodyBytes:             cfg.MaxBodyBytes,
+			TrustedProxies:           cfg.TrustedProxies,
+			ProxyHeader:              cfg.ProxyHeader,
 			CORSAllowOrigins:         cfg.CORSAllowOrigins,
 			CORSAllowMethods:         cfg.CORSAllowMethods,
 			CORSAllowHeaders:         cfg.CORSAllowHeaders,
@@ -146,6 +162,7 @@ func run(cfg config.Config, log *slog.Logger, build buildinfo.Info) error {
 			HealthReadyTimeout:       cfg.HealthReadyTimeout,
 			MetricsEnabled:           cfg.MetricsEnabled,
 			MetricsPath:              cfg.MetricsPath,
+			MetricsAddress:           cfg.MetricsAddress,
 		},
 		log,
 		httpserver.Observability{
@@ -158,6 +175,17 @@ func run(cfg config.Config, log *slog.Logger, build buildinfo.Info) error {
 		userUC,
 		httpapi.Check{Name: "postgres", Probe: pool.Ping},
 	)
+
+	var metricsServer *httpserver.MetricsServer
+	metricsErr := make(chan error, 1)
+	if cfg.MetricsEnabled && cfg.MetricsAddress != "" {
+		metricsServer, err = httpserver.NewMetricsServer(cfg.MetricsAddress, cfg.MetricsPath, metrics.Handler())
+		if err != nil {
+			return fmt.Errorf("start metrics listener: %w", err)
+		}
+		log.Info("serving metrics on a separate listener", "address", metricsServer.Addr(), "path", cfg.MetricsPath)
+		go func() { metricsErr <- metricsServer.Serve() }()
+	}
 
 	serveErr := make(chan error, 1)
 	go func() {
@@ -182,19 +210,29 @@ func run(cfg config.Config, log *slog.Logger, build buildinfo.Info) error {
 		}
 		return nil
 
-	case <-ctx.Done():
-		log.Info("shutdown signal received, draining in-flight requests")
-
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-		defer cancel()
-
-		if err := app.ShutdownWithContext(shutdownCtx); err != nil {
-			return fmt.Errorf("graceful shutdown: %w", err)
+	case err := <-metricsErr:
+		if err != nil {
+			return fmt.Errorf("metrics listener: %w", err)
 		}
+		return nil
+
+	case <-signalCtx.Done():
+		log.Info("shutdown signal received, no longer accepting connections",
+			"grace_period", cfg.ShutdownTimeout)
+
+		drainErr := httpserver.Drain(cfg.ShutdownTimeout, abandonInFlight, app, metricsServer)
 
 		<-serveErr
+		if metricsServer != nil {
+			<-metricsErr
+		}
 
-		log.Info("shutdown complete")
+		if drainErr != nil {
+			log.Warn("some work did not finish within the grace period", "error", drainErr)
+			return fmt.Errorf("graceful shutdown: %w", drainErr)
+		}
+
+		log.Info("shutdown complete, every in-flight request finished")
 		return nil
 	}
 }
