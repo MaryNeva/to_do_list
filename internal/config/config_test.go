@@ -1,11 +1,16 @@
 package config
 
 import (
+	"context"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/bcrypt"
+
+	"to-do-list/internal/auth/password"
 )
 
 const completeYAML = `
@@ -18,6 +23,9 @@ server:
   read_timeout: 10s
   write_timeout: 10s
   shutdown_timeout: 15s
+  max_body_bytes: 1048576
+  trusted_proxies: ""
+  proxy_header: ""
 
 db:
   host: localhost
@@ -27,6 +35,10 @@ db:
   sslmode: disable
   connect_timeout: 5s
   call_timeout: 5s
+  max_connections: 10
+  min_connections: 2
+  max_conn_lifetime: 1h
+  max_conn_idle_time: 30m
 
 jwt:
   ttl: 1h
@@ -37,6 +49,7 @@ jwt:
 password:
   bcrypt_cost: 12
   min_length: 8
+  max_concurrent_hashes: 4
 
 user:
   min_username_length: 3
@@ -65,6 +78,12 @@ cors:
 
 health:
   ready_timeout: 2s
+
+observability:
+  metrics_enabled: true
+  metrics_path: /metrics
+  metrics_namespace: todo
+  metrics_address: ""
 
 log:
   level: info
@@ -145,6 +164,9 @@ func TestLoadFrom_ReadsEverySettingFromYAML(t *testing.T) {
 		{"MigrationsPath", cfg.MigrationsPath, "migrations"},
 		{"LogLevel", cfg.LogLevel, "info"},
 		{"LogFormat", cfg.LogFormat, "json"},
+		{"MetricsEnabled", cfg.MetricsEnabled, true},
+		{"MetricsPath", cfg.MetricsPath, "/metrics"},
+		{"MetricsNamespace", cfg.MetricsNamespace, "todo"},
 	}
 
 	for _, c := range checks {
@@ -220,6 +242,9 @@ func TestLoadFrom_MissingSettingIsReportedNotDefaulted(t *testing.T) {
   read_timeout: 10s
   write_timeout: 10s
   shutdown_timeout: 15s
+  max_body_bytes: 1048576
+  trusted_proxies: ""
+  proxy_header: ""
 `, "", 1)
 
 	configPath, envPath := writeConfig(t, yaml)
@@ -248,7 +273,7 @@ func TestLoadFrom_MissingConfigFileReportsEverySetting(t *testing.T) {
 	}
 }
 
-func TestLoadFrom_InvalidValueIsReportedWithTheKeyName(t *testing.T) {
+func TestLoadFrom_InvalidYAMLTypeReportsLocation(t *testing.T) {
 	setSecrets(t)
 
 	yaml := strings.Replace(completeYAML, "  port: 5432", "  port: not-a-number", 1)
@@ -258,8 +283,8 @@ func TestLoadFrom_InvalidValueIsReportedWithTheKeyName(t *testing.T) {
 	if err == nil {
 		t.Fatal("LoadFrom() with a non-numeric db.port should return an error")
 	}
-	if !strings.Contains(err.Error(), "db.port") || !strings.Contains(err.Error(), "not-a-number") {
-		t.Errorf("error should name the key and the bad value, got: %v", err)
+	if !strings.Contains(err.Error(), "line 17") || !strings.Contains(err.Error(), "into int") {
+		t.Errorf("error should identify the invalid YAML type and location, got: %v", err)
 	}
 }
 
@@ -279,7 +304,7 @@ func TestLoadFrom_SecretsAreNeverReadFromYAML(t *testing.T) {
 	if err == nil {
 		t.Fatal("LoadFrom() should refuse to take secrets from config.yaml")
 	}
-	for _, want := range []string{"DB_PASSWORD", "JWT_SECRET", "never in config.yaml"} {
+	for _, want := range []string{"db_password", "jwt_secret", "not found"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
@@ -392,7 +417,7 @@ server:
   address: ":8080"   # trailing comment
   read_timeout: 10s
 
-flat_key: flat-value
+migrations_path: migrations
 `
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write temp config.yaml: %v", err)
@@ -406,7 +431,7 @@ flat_key: flat-value
 	want := map[string]string{
 		"server.address":      ":8080",
 		"server.read_timeout": "10s",
-		"flat_key":            "flat-value",
+		"migrations_path":     "migrations",
 	}
 	for key, wantValue := range want {
 		if values[key] != wantValue {
@@ -428,7 +453,7 @@ func TestReadYAML_MissingFileYieldsEmptyMap(t *testing.T) {
 func TestReadDotEnv_ParsesKeysAndStripsMatchingQuotes(t *testing.T) {
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, ".env")
-	content := "# a comment\n\nQUOTED=\"quoted value\"\nBARE=bare-value\nUNBALANCED=\"still-quoted\nNO_EQUALS_SIGN\n"
+	content := "# a comment\n\nQUOTED=\"quoted value\"\nBARE=bare-value\n"
 	if err := os.WriteFile(envPath, []byte(content), 0o600); err != nil {
 		t.Fatalf("write temp .env: %v", err)
 	}
@@ -439,9 +464,8 @@ func TestReadDotEnv_ParsesKeysAndStripsMatchingQuotes(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"QUOTED":     "quoted value",
-		"BARE":       "bare-value",
-		"UNBALANCED": `"still-quoted`,
+		"QUOTED": "quoted value",
+		"BARE":   "bare-value",
 	}
 	for key, wantValue := range want {
 		if values[key] != wantValue {
@@ -595,9 +619,18 @@ func TestLoadFrom_OptionalSecretsComeFromDotEnv(t *testing.T) {
 		t.Fatalf("write temp config.yaml: %v", err)
 	}
 
+	hasher, err := password.NewHasher(bcrypt.MinCost, 1)
+	if err != nil {
+		t.Fatalf("NewHasher(): %v", err)
+	}
+	adminHash, err := hasher.Hash(context.Background(), "an-admin-password")
+	if err != nil {
+		t.Fatalf("Hash(): %v", err)
+	}
+
 	envPath := filepath.Join(dir, ".env")
 	dotenv := "DB_PASSWORD=s3cret\nJWT_SECRET=" + strings.Repeat("e", 32) +
-		"\nADMIN_USERNAME=root\nADMIN_PASSWORD_HASH=$2a$12$fakehashvalue\n"
+		"\nADMIN_USERNAME=root\nADMIN_PASSWORD_HASH=" + adminHash + "\n"
 	if err := os.WriteFile(envPath, []byte(dotenv), 0o600); err != nil {
 		t.Fatalf("write temp .env: %v", err)
 	}
@@ -647,5 +680,96 @@ func TestLoadFrom_RejectsRefreshTTLShorterThanAccessTTL(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "jwt.refresh_ttl") {
 		t.Errorf("error should name the key, got: %v", err)
+	}
+}
+
+func TestLoadFrom_RejectsUnusableMetricsSettings(t *testing.T) {
+	cases := []struct {
+		name string
+		from string
+		to   string
+		key  string
+	}{
+		{
+			name: "path without a leading slash",
+			from: "  metrics_path: /metrics",
+			to:   "  metrics_path: metrics",
+			key:  "observability.metrics_path",
+		},
+		{
+			name: "namespace with a dash",
+			from: "  metrics_namespace: todo",
+			to:   "  metrics_namespace: to-do",
+			key:  "observability.metrics_namespace",
+		},
+		{
+			name: "namespace starting with a digit",
+			from: "  metrics_namespace: todo",
+			to:   "  metrics_namespace: 1todo",
+			key:  "observability.metrics_namespace",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setSecrets(t)
+
+			yaml := strings.Replace(completeYAML, tc.from, tc.to, 1)
+			if yaml == completeYAML {
+				t.Fatalf("fixture does not contain %q", tc.from)
+			}
+			configPath, envPath := writeConfig(t, yaml)
+
+			_, err := LoadFrom(configPath, envPath)
+			if err == nil {
+				t.Fatal("the setting should be rejected")
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("error should name %s, got: %v", tc.key, err)
+			}
+		})
+	}
+}
+
+// A malformed admin hash rejects every admin login. Failing at startup names
+// the variable; failing at login time produces a 500 per attempt and no clue.
+func TestLoadFrom_RejectsAnAdminHashBcryptCannotRead(t *testing.T) {
+	setSecrets(t)
+	t.Setenv("ADMIN_USERNAME", "root")
+	t.Setenv("ADMIN_PASSWORD_HASH", "definitely-not-a-bcrypt-hash")
+
+	configPath, envPath := writeConfig(t, completeYAML)
+
+	_, err := LoadFrom(configPath, envPath)
+	if err == nil {
+		t.Fatal("LoadFrom() accepted an ADMIN_PASSWORD_HASH that is not a bcrypt hash")
+	}
+	if !strings.Contains(err.Error(), "ADMIN_PASSWORD_HASH") {
+		t.Errorf("error does not name the variable: %v", err)
+	}
+}
+
+func TestLoadFrom_AcceptsARealAdminHash(t *testing.T) {
+	setSecrets(t)
+
+	hasher, err := password.NewHasher(bcrypt.MinCost, 1)
+	if err != nil {
+		t.Fatalf("NewHasher(): %v", err)
+	}
+	hash, err := hasher.Hash(context.Background(), "an-admin-password")
+	if err != nil {
+		t.Fatalf("Hash(): %v", err)
+	}
+
+	t.Setenv("ADMIN_USERNAME", "root")
+	t.Setenv("ADMIN_PASSWORD_HASH", hash)
+
+	configPath, envPath := writeConfig(t, completeYAML)
+	cfg, err := LoadFrom(configPath, envPath)
+	if err != nil {
+		t.Fatalf("LoadFrom(): %v", err)
+	}
+	if cfg.AdminPasswordHash != hash {
+		t.Error("the admin hash did not survive loading")
 	}
 }

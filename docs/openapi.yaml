@@ -12,12 +12,17 @@ tags:
   - name: auth
   - name: tasks
   - name: users
+  - name: operations
+    description: |
+      Liveness, readiness and metrics. These sit at the root of the service,
+      outside the /api/v1 prefix, and need no authentication.
 
 paths:
   /auth/register:
     post:
       tags: [auth]
       summary: Create a new user account
+      security: []
       requestBody:
         required: true
         content:
@@ -36,6 +41,12 @@ paths:
     post:
       tags: [auth]
       summary: Exchange credentials for a JWT access token
+      security: []
+      description: |
+        Answers 401 for an unknown user or a wrong password, and also when the
+        password is changed while this login is in flight: the session would
+        otherwise be opened behind the revocation that the password change ran.
+        The client should retry with the new password.
       requestBody:
         required: true
         content:
@@ -54,6 +65,7 @@ paths:
     post:
       tags: [auth]
       summary: Exchange a refresh token for a new pair
+      security: []
       description: |
         Rotates the session: the presented refresh token is consumed and a
         new one is issued together with a fresh access token. The exchange is
@@ -77,6 +89,7 @@ paths:
     post:
       tags: [auth]
       summary: Revoke a refresh token
+      security: []
       description: |
         Ends the session the refresh token belongs to. Already unknown or
         revoked tokens are accepted, since the requested state is reached
@@ -140,12 +153,11 @@ paths:
         - { name: order, in: query, schema: { type: string, enum: [asc, desc], default: desc } }
       responses:
         '200':
-          description: OK
+          description: One page of the caller's tasks
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/Task' }
+              schema: { $ref: '#/components/schemas/TaskPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
   /tasks/{id}:
@@ -161,11 +173,17 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Task' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
     patch:
       tags: [tasks]
       summary: Update one of the caller's own tasks
+      description: >-
+        Only the properties present in the body are written, so a client that
+        sends a title cannot erase a description someone else just changed.
+        Setting status here is absolute and safe to retry, unlike
+        POST /tasks/{id}/toggle-status.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -187,6 +205,7 @@ paths:
       security: [{ bearerAuth: [] }]
       responses:
         '204': { description: Deleted }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
 
@@ -196,6 +215,9 @@ paths:
     post:
       tags: [tasks]
       summary: Cycle status created -> in_progress -> completed -> created
+      description: >-
+        Relative, so a retry after a lost response advances the task a second
+        time. Use PATCH /tasks/{id} with an explicit status when that matters.
       security: [{ bearerAuth: [] }]
       responses:
         '200':
@@ -203,6 +225,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Task' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
 
@@ -216,12 +239,11 @@ paths:
       security: [{ bearerAuth: [] }]
       responses:
         '200':
-          description: OK
+          description: One page of users
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/User' }
+              schema: { $ref: '#/components/schemas/UserPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
@@ -238,6 +260,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -266,9 +289,73 @@ paths:
       security: [{ bearerAuth: [] }]
       responses:
         '204': { description: Deleted }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+
+  /healthz:
+    servers:
+      - url: http://localhost:8080
+    get:
+      tags: [operations]
+      summary: Liveness probe
+      description: |
+        Answers as long as the process is running. It deliberately touches no
+        dependency: restarting the service because the database blinked makes
+        an outage longer, not shorter. Use /readyz to decide whether to send
+        traffic.
+      security: []
+      responses:
+        '200':
+          description: The process is alive
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+
+  /readyz:
+    servers:
+      - url: http://localhost:8080
+    get:
+      tags: [operations]
+      summary: Readiness probe
+      description: |
+        Probes every dependency, each under health.ready_timeout, and reports
+        them separately so an unready instance names the dependency at fault.
+        Answers 503 if any check fails.
+      security: []
+      responses:
+        '200':
+          description: Every dependency answered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Readiness' }
+        '503':
+          description: At least one dependency is unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Readiness' }
+
+  /metrics:
+    servers:
+      - url: http://localhost:8080
+    get:
+      tags: [operations]
+      summary: Prometheus metrics
+      description: |
+        The Prometheus text exposition format. Served only when
+        observability.metrics_enabled is true, at observability.metrics_path.
+        The endpoint is unauthenticated, so it belongs on an internal network
+        or behind an ingress rule. See the Observability section of README.md
+        for the metric list.
+      security: []
+      responses:
+        '200':
+          description: Metrics in the Prometheus text exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
 
 components:
   securitySchemes:
@@ -317,11 +404,142 @@ components:
           schema: { $ref: '#/components/schemas/Error' }
 
   schemas:
-    Error:
+    Page:
+      type: object
+      description: |
+        The envelope every list endpoint returns. limit and offset echo what
+        was actually applied after clamping, which is not always what was
+        asked for: a limit above the configured maximum comes back trimmed to
+        it, so a client can page correctly without knowing the server's
+        limits in advance.
+      required: [items, total, limit, offset]
+      properties:
+        total:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Rows matching the query, ignoring limit and offset.
+        limit:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Page size actually used.
+        offset:
+          type: integer
+          format: int32
+          minimum: 0
+
+    TaskPage:
+      allOf:
+        - $ref: '#/components/schemas/Page'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/Task' }
+
+    UserPage:
+      allOf:
+        - $ref: '#/components/schemas/Page'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/User' }
+
+    Health:
       type: object
       properties:
-        error: { type: string }
+        status:
+          type: string
+          example: ok
+        build:
+          $ref: '#/components/schemas/BuildInfo'
+
+    BuildInfo:
+      type: object
+      description: |
+        Identity of the running binary. Set through -ldflags at build time,
+        falling back to the VCS stamps the Go toolchain embeds.
+      properties:
+        version:
+          type: string
+          example: v1.4.0
+        commit:
+          type: string
+          example: 9f2c1ab
+        built_at:
+          type: string
+          example: "2026-09-17T09:12:00Z"
+        go_version:
+          type: string
+          example: go1.24.0
+
+    Readiness:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ready, unavailable]
+        checks:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ReadinessCheck'
+      example:
+        status: ready
+        checks:
+          postgres:
+            status: ok
+            duration_ms: 0.42
+
+    ReadinessCheck:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable]
+        duration_ms:
+          type: number
+          format: double
+      description: >-
+        The reason a check failed is deliberately absent: it names the host,
+        port, database and user the probe could not reach, and this endpoint
+        needs no credentials. It is written to the service log instead.
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: >-
+            The stable identifier of the failure. Branch on this; the message
+            is written for people and may be reworded at any time.
+          enum:
+            - validation_error
+            - bad_request
+            - not_found
+            - conflict
+            - unauthorized
+            - invalid_credentials
+            - forbidden
+            - method_not_allowed
+            - payload_too_large
+            - rate_limited
+            - internal_error
+        message: { type: string }
         request_id: { type: string }
+        fields:
+          type: array
+          description: Which fields were rejected. Sent with validation_error only.
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string }
+              message: { type: string }
 
     RegisterRequest:
       type: object
@@ -364,17 +582,6 @@ components:
         refresh_token: { type: string }
         refresh_expires_at: { type: string, format: date-time }
 
-    Page:
-      type: object
-      description: |
-        Envelope shared by the list endpoints. total counts everything the
-        filter matches, not just the current page.
-      properties:
-        items: { type: array, items: {} }
-        total: { type: integer, example: 137 }
-        limit: { type: integer, example: 20 }
-        offset: { type: integer, example: 0 }
-
     Me:
       type: object
       properties:
@@ -413,11 +620,28 @@ components:
 
     UpdateTaskRequest:
       type: object
-      required: [title]
+      minProperties: 1
+      description: >-
+        A partial edit. Every property is optional and only the ones present
+        are written; a property sent as null counts as absent. An empty
+        description clears it, an empty title is rejected.
       properties:
         # Lengths are counted in Unicode characters, not bytes.
-        title: { type: string, minLength: 1, maxLength: 200 }
-        description: { type: string, maxLength: 4000 }
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Present and non-empty to rename; absent to keep the current title.
+        description:
+          type: string
+          maxLength: 4000
+          description: Present to overwrite, "" to clear, absent to keep.
+        status:
+          type: string
+          enum: [created, in_progress, completed]
+          description: >-
+            The status the task should end up in. Absolute, not relative, so
+            repeating the same request leaves the task where it already is.
 
     Task:
       type: object

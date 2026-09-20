@@ -1,7 +1,6 @@
 package domain
 
 import (
-	"context"
 	"time"
 )
 
@@ -19,17 +18,8 @@ func (t RefreshToken) IsUsable(now time.Time) bool {
 }
 
 type RotateResult struct {
-	Issued RefreshToken
-	UserID int64
-}
-
-type RefreshTokenRepository interface {
-	Create(ctx context.Context, token RefreshToken) (RefreshToken, error)
-	GetByHash(ctx context.Context, hash string) (RefreshToken, error)
-
-	Rotate(ctx context.Context, presentedHash string, replacement RefreshToken, now time.Time) (RotateResult, error)
-
-	Revoke(ctx context.Context, hash string) error
-	RevokeAllForUser(ctx context.Context, userID int64) error
-	DeleteExpired(ctx context.Context, before time.Time) (int64, error)
+	Issued          RefreshToken
+	UserID          int64
+	Username        string
+	SessionsRevoked int64
 }

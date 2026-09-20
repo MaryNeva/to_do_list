@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/mail"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -25,25 +26,31 @@ type UserConfig struct {
 }
 
 type UserUseCase struct {
-	repo   domain.UserRepository
-	hasher *password.Hasher
-	cfg    UserConfig
-	logger *slog.Logger
+	repo    UserRepository
+	hasher  *password.Hasher
+	cfg     UserConfig
+	logger  *slog.Logger
+	metrics MetricsRecorder
 }
 
-func NewUserUseCase(repo domain.UserRepository, hasher *password.Hasher, cfg UserConfig, logger *slog.Logger) *UserUseCase {
-	return &UserUseCase{repo: repo, hasher: hasher, cfg: cfg, logger: logger}
+func NewUserUseCase(repo UserRepository, hasher *password.Hasher, cfg UserConfig, logger *slog.Logger, opts ...Option) *UserUseCase {
+	resolved := applyOptions(opts)
+	return &UserUseCase{repo: repo, hasher: hasher, cfg: cfg, logger: logger, metrics: resolved.metrics}
 }
 
-var _ domain.UserService = (*UserUseCase)(nil)
-
-func (uc *UserUseCase) Get(ctx context.Context, id int64) (domain.User, error) {
+func (uc *UserUseCase) Get(ctx context.Context, actor domain.Claims, id int64) (domain.User, error) {
+	if err := authorizeUser(actor, id, false); err != nil {
+		return domain.User{}, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 	return uc.repo.GetByID(ctx, id)
 }
 
-func (uc *UserUseCase) List(ctx context.Context, page domain.PageRequest) (domain.Page[domain.User], error) {
+func (uc *UserUseCase) List(ctx context.Context, actor domain.Claims, page domain.PageRequest) (domain.Page[domain.User], error) {
+	if err := authorizeUser(actor, 0, true); err != nil {
+		return domain.Page[domain.User]{}, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
@@ -57,7 +64,10 @@ func (uc *UserUseCase) List(ctx context.Context, page domain.PageRequest) (domai
 	return users, nil
 }
 
-func (uc *UserUseCase) Update(ctx context.Context, id int64, username, email, newPassword string) (domain.User, error) {
+func (uc *UserUseCase) Update(ctx context.Context, actor domain.Claims, id int64, username, email, newPassword string) (domain.User, error) {
+	if err := authorizeUser(actor, id, false); err != nil {
+		return domain.User{}, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
@@ -73,25 +83,42 @@ func (uc *UserUseCase) Update(ctx context.Context, id int64, username, email, ne
 		fields.Username = &username
 	}
 	if email = strings.TrimSpace(email); email != "" {
+		if err := validateEmail(email); err != nil {
+			return domain.User{}, err
+		}
 		fields.Email = &email
 	}
 	if newPassword != "" {
 		if err := validatePassword(newPassword, uc.cfg.MinPasswordLength); err != nil {
 			return domain.User{}, err
 		}
-		hash, err := uc.hasher.Hash(newPassword)
+		hash, err := uc.hasher.Hash(ctx, newPassword)
 		if err != nil {
 			return domain.User{}, fmt.Errorf("hash password: %w", err)
 		}
 		fields.PasswordHash = &hash
 	}
 
-	update := uc.repo.Update
-	if fields.PasswordHash != nil {
-		update = uc.repo.UpdateAndRevokeSessions
+	if fields.PasswordHash == nil {
+		return uc.update(ctx, id, fields)
 	}
 
-	updated, err := update(ctx, id, fields)
+	updated, revoked, err := uc.repo.UpdateAndRevokeSessions(ctx, id, fields)
+	if err != nil {
+		if errors.Is(err, apperr.ErrNotFound) || errors.Is(err, apperr.ErrConflict) {
+			return domain.User{}, err
+		}
+		uc.logger.ErrorContext(ctx, "update user failed", "error", err, "user_id", id)
+		return domain.User{}, fmt.Errorf("update user: %w", err)
+	}
+
+	uc.metrics.SessionsRevoked(ReasonPasswordChange, revoked)
+
+	return updated, nil
+}
+
+func (uc *UserUseCase) update(ctx context.Context, id int64, fields domain.UserUpdate) (domain.User, error) {
+	updated, err := uc.repo.Update(ctx, id, fields)
 	if err != nil {
 		if errors.Is(err, apperr.ErrNotFound) || errors.Is(err, apperr.ErrConflict) {
 			return domain.User{}, err
@@ -103,7 +130,10 @@ func (uc *UserUseCase) Update(ctx context.Context, id int64, username, email, ne
 	return updated, nil
 }
 
-func (uc *UserUseCase) Delete(ctx context.Context, id int64) error {
+func (uc *UserUseCase) Delete(ctx context.Context, actor domain.Claims, id int64) error {
+	if err := authorizeUser(actor, id, false); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 	if err := uc.repo.Delete(ctx, id); err != nil {
@@ -136,6 +166,23 @@ func validateUsername(username string, min, max int) error {
 	}
 }
 
+const maxEmailLength = 320
+
+func validateEmail(email string) error {
+	if email == "" {
+		return fmt.Errorf("%w: email is required", apperr.ErrValidation)
+	}
+	if utf8.RuneCountInString(email) > maxEmailLength {
+		return fmt.Errorf("%w: email must be at most %d characters", apperr.ErrValidation, maxEmailLength)
+	}
+
+	parsed, err := mail.ParseAddress(email)
+	if err != nil || parsed.Address != email {
+		return fmt.Errorf("%w: %q is not a valid email address", apperr.ErrValidation, email)
+	}
+	return nil
+}
+
 func validatePassword(plain string, min int) error {
 	switch {
 	case utf8.RuneCountInString(plain) < min:
@@ -158,4 +205,18 @@ func clampPage(page domain.PageRequest, defaultSize, maxSize int) domain.PageReq
 		page.Offset = 0
 	}
 	return page
+}
+
+// actor must originate from a trusted authenticator, never from request JSON.
+func authorizeUser(actor domain.Claims, targetID int64, adminOnly bool) error {
+	if actor.UserID < 0 || (actor.UserID == 0 && !actor.IsAdmin) {
+		return apperr.ErrUnauthorized
+	}
+	if actor.IsAdmin {
+		return nil
+	}
+	if !adminOnly && targetID > 0 && actor.UserID == targetID {
+		return nil
+	}
+	return apperr.ErrForbidden
 }

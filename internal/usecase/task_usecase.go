@@ -22,18 +22,21 @@ type TaskConfig struct {
 }
 
 type TaskUseCase struct {
-	repo   domain.TaskRepository
+	repo   TaskRepository
 	cfg    TaskConfig
 	logger *slog.Logger
 }
 
-func NewTaskUseCase(repo domain.TaskRepository, cfg TaskConfig, logger *slog.Logger) *TaskUseCase {
+func NewTaskUseCase(repo TaskRepository, cfg TaskConfig, logger *slog.Logger) *TaskUseCase {
 	return &TaskUseCase{repo: repo, cfg: cfg, logger: logger}
 }
 
-var _ domain.TaskService = (*TaskUseCase)(nil)
+func (uc *TaskUseCase) Create(ctx context.Context, actor domain.Claims, title, description string) (domain.Task, error) {
+	creatorID, err := taskOwner(actor)
+	if err != nil {
+		return domain.Task{}, err
+	}
 
-func (uc *TaskUseCase) Create(ctx context.Context, creatorID int64, title, description string) (domain.Task, error) {
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
@@ -60,7 +63,12 @@ func (uc *TaskUseCase) Create(ctx context.Context, creatorID int64, title, descr
 	return created, nil
 }
 
-func (uc *TaskUseCase) Get(ctx context.Context, requesterID, id int64) (domain.Task, error) {
+func (uc *TaskUseCase) Get(ctx context.Context, actor domain.Claims, id int64) (domain.Task, error) {
+	requesterID, err := taskOwner(actor)
+	if err != nil {
+		return domain.Task{}, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
@@ -76,7 +84,12 @@ func (uc *TaskUseCase) Get(ctx context.Context, requesterID, id int64) (domain.T
 	return task, nil
 }
 
-func (uc *TaskUseCase) List(ctx context.Context, requesterID int64, filter domain.TaskFilter) (domain.Page[domain.Task], error) {
+func (uc *TaskUseCase) List(ctx context.Context, actor domain.Claims, filter domain.TaskFilter) (domain.Page[domain.Task], error) {
+	requesterID, err := taskOwner(actor)
+	if err != nil {
+		return domain.Page[domain.Task]{}, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
@@ -95,38 +108,75 @@ func (uc *TaskUseCase) List(ctx context.Context, requesterID int64, filter domai
 	return page, nil
 }
 
-func (uc *TaskUseCase) Update(ctx context.Context, requesterID, id int64, title, description string) (domain.Task, error) {
+// Update applies a partial edit. Setting a status here is absolute, so a
+// client that retries after a lost response lands on the status it asked for
+// rather than one step further, which is what ToggleStatus cannot promise.
+func (uc *TaskUseCase) Update(ctx context.Context, actor domain.Claims, id int64, update domain.TaskUpdate) (domain.Task, error) {
+	requesterID, err := taskOwner(actor)
+	if err != nil {
+		return domain.Task{}, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
-	title = strings.TrimSpace(title)
-	description = strings.TrimSpace(description)
-
-	if err := uc.validateTaskFields(title, description); err != nil {
-		return domain.Task{}, err
-	}
-
-	existing, err := uc.repo.GetByID(ctx, id)
+	update, err = uc.normalizeUpdate(update)
 	if err != nil {
 		return domain.Task{}, err
 	}
-	if existing.CreatorID != requesterID {
-		return domain.Task{}, apperr.ErrNotFound
-	}
 
-	existing.Title = title
-	existing.Description = description
-
-	updated, err := uc.repo.Update(ctx, existing)
-	if err != nil {
+	updated, err := uc.repo.Update(ctx, id, requesterID, update)
+	switch {
+	case err == nil:
+		return updated, nil
+	case errors.Is(err, apperr.ErrNotFound):
+		return domain.Task{}, err
+	default:
 		uc.logger.ErrorContext(ctx, "update task failed", "error", err, "task_id", id)
 		return domain.Task{}, fmt.Errorf("update task: %w", err)
 	}
-
-	return updated, nil
 }
 
-func (uc *TaskUseCase) Delete(ctx context.Context, requesterID, id int64) error {
+// normalizeUpdate trims what was sent and rejects what a task cannot hold.
+// An absent field is left alone; an empty description clears it, an empty
+// title does not, because a task without a title has nothing to show.
+func (uc *TaskUseCase) normalizeUpdate(update domain.TaskUpdate) (domain.TaskUpdate, error) {
+	if update.IsEmpty() {
+		return update, fmt.Errorf("%w: at least one of title, description, status must be present", apperr.ErrValidation)
+	}
+
+	if update.Title != nil {
+		title := strings.TrimSpace(*update.Title)
+		switch {
+		case title == "":
+			return update, fmt.Errorf("%w: title must not be empty", apperr.ErrValidation)
+		case utf8.RuneCountInString(title) > uc.cfg.MaxTitleLength:
+			return update, fmt.Errorf("%w: title must be at most %d characters", apperr.ErrValidation, uc.cfg.MaxTitleLength)
+		}
+		update.Title = &title
+	}
+
+	if update.Description != nil {
+		description := strings.TrimSpace(*update.Description)
+		if utf8.RuneCountInString(description) > uc.cfg.MaxDescriptionLength {
+			return update, fmt.Errorf("%w: description must be at most %d characters", apperr.ErrValidation, uc.cfg.MaxDescriptionLength)
+		}
+		update.Description = &description
+	}
+
+	if update.Status != nil && !domain.IsValidStatus(*update.Status) {
+		return update, fmt.Errorf("%w: unknown status %q", apperr.ErrValidation, *update.Status)
+	}
+
+	return update, nil
+}
+
+func (uc *TaskUseCase) Delete(ctx context.Context, actor domain.Claims, id int64) error {
+	requesterID, err := taskOwner(actor)
+	if err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
@@ -148,7 +198,12 @@ func (uc *TaskUseCase) Delete(ctx context.Context, requesterID, id int64) error 
 
 const maxToggleAttempts = 50
 
-func (uc *TaskUseCase) ToggleStatus(ctx context.Context, requesterID, id int64) (domain.Task, error) {
+func (uc *TaskUseCase) ToggleStatus(ctx context.Context, actor domain.Claims, id int64) (domain.Task, error) {
+	requesterID, err := taskOwner(actor)
+	if err != nil {
+		return domain.Task{}, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
@@ -181,6 +236,19 @@ func (uc *TaskUseCase) ToggleStatus(ctx context.Context, requesterID, id int64) 
 
 	uc.logger.WarnContext(ctx, "toggle task status gave up after repeated conflicts", "task_id", id, "attempts", maxToggleAttempts)
 	return domain.Task{}, fmt.Errorf("%w: task status changed concurrently, try again", apperr.ErrConflict)
+}
+
+// taskOwner is the whole ownership rule: a task belongs to the account that
+// created it. The bootstrap admin has no row in users and so can own none.
+func taskOwner(actor domain.Claims) (int64, error) {
+	switch {
+	case actor.UserID > 0:
+		return actor.UserID, nil
+	case actor.UserID == 0 && actor.IsAdmin:
+		return 0, apperr.ErrForbidden
+	default:
+		return 0, apperr.ErrUnauthorized
+	}
 }
 
 func (uc *TaskUseCase) validateTaskFields(title, description string) error {

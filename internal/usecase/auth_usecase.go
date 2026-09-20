@@ -24,13 +24,14 @@ type RefreshTokenIssuer interface {
 }
 
 type AuthUseCase struct {
-	users   domain.UserRepository
+	users   AuthUsers
 	tokens  TokenService
-	refresh domain.RefreshTokenRepository
+	refresh SessionStore
 	issuer  RefreshTokenIssuer
 	hasher  *password.Hasher
 	cfg     AuthConfig
 	logger  *slog.Logger
+	metrics MetricsRecorder
 }
 
 type AuthConfig struct {
@@ -44,14 +45,17 @@ type AuthConfig struct {
 }
 
 func NewAuthUseCase(
-	users domain.UserRepository,
+	users AuthUsers,
 	tokens TokenService,
-	refresh domain.RefreshTokenRepository,
+	refresh SessionStore,
 	issuer RefreshTokenIssuer,
 	hasher *password.Hasher,
 	cfg AuthConfig,
 	logger *slog.Logger,
+	opts ...Option,
 ) *AuthUseCase {
+	resolved := applyOptions(opts)
+
 	return &AuthUseCase{
 		users:   users,
 		tokens:  tokens,
@@ -60,12 +64,17 @@ func NewAuthUseCase(
 		hasher:  hasher,
 		cfg:     cfg,
 		logger:  logger,
+		metrics: resolved.metrics,
 	}
 }
 
-var _ domain.AuthService = (*AuthUseCase)(nil)
-
 func (a *AuthUseCase) Register(ctx context.Context, username, email, plainPassword string) (domain.User, error) {
+	user, err := a.register(ctx, username, email, plainPassword)
+	a.metrics.AuthAttempt(OperationRegister, outcomeOf(err))
+	return user, err
+}
+
+func (a *AuthUseCase) register(ctx context.Context, username, email, plainPassword string) (domain.User, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.cfg.Timeout)
 	defer cancel()
 
@@ -74,6 +83,9 @@ func (a *AuthUseCase) Register(ctx context.Context, username, email, plainPasswo
 
 	if username == "" || email == "" || plainPassword == "" {
 		return domain.User{}, fmt.Errorf("%w: username, email and password are required", apperr.ErrValidation)
+	}
+	if err := validateEmail(email); err != nil {
+		return domain.User{}, err
 	}
 	if err := validateUsername(username, a.cfg.MinUsernameLength, a.cfg.MaxUsernameLength); err != nil {
 		return domain.User{}, err
@@ -86,7 +98,7 @@ func (a *AuthUseCase) Register(ctx context.Context, username, email, plainPasswo
 		return domain.User{}, err
 	}
 
-	hash, err := a.hasher.Hash(plainPassword)
+	hash, err := a.hasher.Hash(ctx, plainPassword)
 	if err != nil {
 		return domain.User{}, fmt.Errorf("hash password: %w", err)
 	}
@@ -108,22 +120,30 @@ func (a *AuthUseCase) Register(ctx context.Context, username, email, plainPasswo
 }
 
 func (a *AuthUseCase) Login(ctx context.Context, username, plainPassword string) (domain.Tokens, domain.User, error) {
+	tokens, user, err := a.login(ctx, username, plainPassword)
+	a.metrics.AuthAttempt(OperationLogin, outcomeOf(err))
+	return tokens, user, err
+}
+
+func (a *AuthUseCase) login(ctx context.Context, username, plainPassword string) (domain.Tokens, domain.User, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.cfg.Timeout)
 	defer cancel()
 
 	username = normalizeUsername(username)
 
 	if isReservedUsername(a.cfg.AdminUsername, username) {
-		if err := password.Verify(a.cfg.AdminPasswordHash, plainPassword); err != nil {
-			return domain.Tokens{}, domain.User{}, apperr.ErrInvalidCredentials
+		if err := a.hasher.Verify(ctx, a.cfg.AdminPasswordHash, plainPassword); err != nil {
+			if errors.Is(err, password.ErrMismatch) {
+				return domain.Tokens{}, domain.User{}, apperr.ErrInvalidCredentials
+			}
+			return domain.Tokens{}, domain.User{}, fmt.Errorf("verify admin password: %w", err)
 		}
 		admin := domain.User{ID: 0, Username: normalizeUsername(a.cfg.AdminUsername)}
 		access, expiresAt, err := a.tokens.Generate(admin.ID, admin.Username, true)
 		if err != nil {
 			return domain.Tokens{}, domain.User{}, fmt.Errorf("generate token: %w", err)
 		}
-		// The bootstrap admin has no row in users, so it cannot own a
-		// refresh token; it re-authenticates with its configured password.
+
 		return domain.Tokens{AccessToken: access, AccessExpiresAt: expiresAt}, admin, nil
 	}
 
@@ -135,8 +155,13 @@ func (a *AuthUseCase) Login(ctx context.Context, username, plainPassword string)
 		return domain.Tokens{}, domain.User{}, fmt.Errorf("get user: %w", err)
 	}
 
-	if !password.Matches(user.PasswordHash, plainPassword) {
-		return domain.Tokens{}, domain.User{}, apperr.ErrInvalidCredentials
+	// Anything other than a mismatch means the comparison never ran - most
+	// likely the hashing queue is full - and must not read as a bad password.
+	if err := a.hasher.Verify(ctx, user.PasswordHash, plainPassword); err != nil {
+		if errors.Is(err, password.ErrMismatch) {
+			return domain.Tokens{}, domain.User{}, apperr.ErrInvalidCredentials
+		}
+		return domain.Tokens{}, domain.User{}, fmt.Errorf("verify password: %w", err)
 	}
 
 	tokens, err := a.issueTokens(ctx, user)
@@ -161,38 +186,37 @@ func (a *AuthUseCase) Refresh(ctx context.Context, refreshToken string) (domain.
 		return domain.Tokens{}, fmt.Errorf("generate refresh token: %w", err)
 	}
 
-	now := time.Now()
-	expiresAt := now.Add(a.cfg.RefreshTTL)
+	expiresAt := time.Now().Add(a.cfg.RefreshTTL)
 
 	result, err := a.refresh.Rotate(ctx, a.issuer.HashRefreshToken(refreshToken), domain.RefreshToken{
 		TokenHash: hash,
 		ExpiresAt: expiresAt,
-	}, now)
+	})
 	switch {
 	case err == nil:
-	case errors.Is(err, apperr.ErrConflict):
-		if revokeErr := a.refresh.RevokeAllForUser(ctx, result.UserID); revokeErr != nil {
-			a.logger.ErrorContext(ctx, "revoking sessions after refresh token reuse failed", "error", revokeErr, "user_id", result.UserID)
-		}
-		a.logger.WarnContext(ctx, "refresh token reused after it was consumed", "user_id", result.UserID)
+		a.metrics.RefreshRotation(OutcomeSuccess)
+	case errors.Is(err, apperr.ErrTokenReuse):
+		a.metrics.RefreshRotation(OutcomeReuse)
+		a.metrics.SessionsRevoked(ReasonTokenReuse, result.SessionsRevoked)
+		a.logger.WarnContext(ctx, "refresh token reused after it was consumed",
+			"user_id", result.UserID, "sessions_revoked", result.SessionsRevoked)
 		return domain.Tokens{}, fmt.Errorf("%w: refresh token is no longer valid", apperr.ErrUnauthorized)
+	case errors.Is(err, apperr.ErrConflict):
+		a.metrics.RefreshRotation(OutcomeFailure)
+		a.logger.ErrorContext(ctx, "generated refresh token collided with an existing one")
+		return domain.Tokens{}, fmt.Errorf("rotate refresh token: %w", err)
 	case errors.Is(err, apperr.ErrNotFound):
+		a.metrics.RefreshRotation(OutcomeUnknown)
 		return domain.Tokens{}, fmt.Errorf("%w: unknown refresh token", apperr.ErrUnauthorized)
 	case errors.Is(err, apperr.ErrUnauthorized):
+		a.metrics.RefreshRotation(OutcomeExpired)
 		return domain.Tokens{}, err
 	default:
+		a.metrics.RefreshRotation(OutcomeFailure)
 		return domain.Tokens{}, fmt.Errorf("rotate refresh token: %w", err)
 	}
 
-	user, err := a.users.GetByID(ctx, result.UserID)
-	if err != nil {
-		if errors.Is(err, apperr.ErrNotFound) {
-			return domain.Tokens{}, fmt.Errorf("%w: account no longer exists", apperr.ErrUnauthorized)
-		}
-		return domain.Tokens{}, fmt.Errorf("get user: %w", err)
-	}
-
-	access, accessExpiresAt, err := a.tokens.Generate(user.ID, user.Username, false)
+	access, accessExpiresAt, err := a.tokens.Generate(result.UserID, result.Username, false)
 	if err != nil {
 		return domain.Tokens{}, fmt.Errorf("generate token: %w", err)
 	}
@@ -216,7 +240,10 @@ func (a *AuthUseCase) Logout(ctx context.Context, refreshToken string) error {
 
 	err := a.refresh.Revoke(ctx, a.issuer.HashRefreshToken(refreshToken))
 	switch {
-	case err == nil, errors.Is(err, apperr.ErrNotFound):
+	case err == nil:
+		a.metrics.SessionsRevoked(ReasonLogout, 1)
+		return nil
+	case errors.Is(err, apperr.ErrNotFound):
 		return nil
 	default:
 		return fmt.Errorf("revoke refresh token: %w", err)
@@ -239,7 +266,12 @@ func (a *AuthUseCase) issueTokens(ctx context.Context, user domain.User) (domain
 		UserID:    user.ID,
 		TokenHash: hash,
 		ExpiresAt: refreshExpiresAt,
-	}); err != nil {
+	}, user.CredentialsVersion); err != nil {
+		if errors.Is(err, apperr.ErrConflict) {
+			return domain.Tokens{}, fmt.Errorf(
+				"%w: the password changed while this login was in progress",
+				apperr.ErrInvalidCredentials)
+		}
 		return domain.Tokens{}, fmt.Errorf("store refresh token: %w", err)
 	}
 

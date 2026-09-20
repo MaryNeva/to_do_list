@@ -41,7 +41,10 @@ func (f fakeAuthService) ValidateToken(ctx context.Context, token string) (domai
 	return f.validateFn(ctx, token)
 }
 
-func newAuthTestApp(svc domain.AuthService) *fiber.App {
+func newAuthTestApp(svc interface {
+	AuthService
+	middleware.TokenValidator
+}) *fiber.App {
 	app := fiber.New(fiber.Config{ErrorHandler: httptransport.NewErrorHandler(silentTestLogger())})
 	h := NewAuthHandler(svc)
 	auth := app.Group("/auth")

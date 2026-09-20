@@ -17,10 +17,10 @@ import (
 )
 
 type fakeUserRepo struct {
-	users  map[int64]domain.User
-	nextID int64
-
-	onSessionRevocation func(userID int64)
+	users               map[int64]domain.User
+	nextID              int64
+	onSessionRevocation func(userID int64) int64
+	getByIDErr          error
 }
 
 func newFakeUserRepo() *fakeUserRepo {
@@ -42,6 +42,9 @@ func (f *fakeUserRepo) Create(_ context.Context, user domain.User) (domain.User,
 }
 
 func (f *fakeUserRepo) GetByID(_ context.Context, id int64) (domain.User, error) {
+	if f.getByIDErr != nil {
+		return domain.User{}, f.getByIDErr
+	}
 	user, ok := f.users[id]
 	if !ok {
 		return domain.User{}, apperr.ErrNotFound
@@ -100,21 +103,24 @@ func (f *fakeUserRepo) Update(_ context.Context, id int64, fields domain.UserUpd
 	}
 	if fields.PasswordHash != nil {
 		user.PasswordHash = *fields.PasswordHash
+		// Mirrors credentials_version = credentials_version + 1.
+		user.CredentialsVersion++
 	}
 	user.UpdatedAt = time.Now()
 	f.users[id] = user
 	return user, nil
 }
 
-func (f *fakeUserRepo) UpdateAndRevokeSessions(ctx context.Context, id int64, fields domain.UserUpdate) (domain.User, error) {
+func (f *fakeUserRepo) UpdateAndRevokeSessions(ctx context.Context, id int64, fields domain.UserUpdate) (domain.User, int64, error) {
 	user, err := f.Update(ctx, id, fields)
 	if err != nil {
-		return domain.User{}, err
+		return domain.User{}, 0, err
 	}
+	var revoked int64
 	if f.onSessionRevocation != nil {
-		f.onSessionRevocation(id)
+		revoked = f.onSessionRevocation(id)
 	}
-	return user, nil
+	return user, revoked, nil
 }
 
 func (f *fakeUserRepo) Delete(_ context.Context, id int64) error {
@@ -127,7 +133,7 @@ func (f *fakeUserRepo) Delete(_ context.Context, id int64) error {
 
 func testHasher(t *testing.T) *password.Hasher {
 	t.Helper()
-	h, err := password.NewHasher(bcrypt.MinCost)
+	h, err := password.NewHasher(bcrypt.MinCost, 2)
 	if err != nil {
 		t.Fatalf("password.NewHasher() unexpected error: %v", err)
 	}
@@ -154,7 +160,7 @@ func newUserUseCaseForTest(t *testing.T) (*UserUseCase, *fakeUserRepo) {
 func TestUserUseCase_Update_DoesNotRehashUnchangedPassword(t *testing.T) {
 	uc, repo := newUserUseCaseForTest(t)
 
-	hash, err := testHasher(t).Hash("original-password")
+	hash, err := testHasher(t).Hash(context.Background(), "original-password")
 	if err != nil {
 		t.Fatalf("Hash() unexpected error: %v", err)
 	}
@@ -167,7 +173,7 @@ func TestUserUseCase_Update_DoesNotRehashUnchangedPassword(t *testing.T) {
 		t.Fatalf("seed Create() unexpected error: %v", err)
 	}
 
-	updated, err := uc.Update(context.Background(), created.ID, "", "alice@new-domain.com", "")
+	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, "", "alice@new-domain.com", "")
 	if err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
@@ -175,7 +181,7 @@ func TestUserUseCase_Update_DoesNotRehashUnchangedPassword(t *testing.T) {
 	if updated.Email != "alice@new-domain.com" {
 		t.Errorf("Update() Email = %q, want %q", updated.Email, "alice@new-domain.com")
 	}
-	if !password.Matches(updated.PasswordHash, "original-password") {
+	if !hasherMatches(t, updated.PasswordHash, "original-password") {
 		t.Error("Update() without a new password must not change the stored password hash")
 	}
 }
@@ -183,18 +189,18 @@ func TestUserUseCase_Update_DoesNotRehashUnchangedPassword(t *testing.T) {
 func TestUserUseCase_Update_ChangesPasswordWhenProvided(t *testing.T) {
 	uc, repo := newUserUseCaseForTest(t)
 
-	hash, _ := testHasher(t).Hash("original-password")
+	hash, _ := testHasher(t).Hash(context.Background(), "original-password")
 	created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
 
-	updated, err := uc.Update(context.Background(), created.ID, "", "", "new-password")
+	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, "", "", "new-password")
 	if err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
 
-	if password.Matches(updated.PasswordHash, "original-password") {
+	if hasherMatches(t, updated.PasswordHash, "original-password") {
 		t.Error("Update() with a new password should invalidate the old one")
 	}
-	if !password.Matches(updated.PasswordHash, "new-password") {
+	if !hasherMatches(t, updated.PasswordHash, "new-password") {
 		t.Error("Update() with a new password should accept the new one")
 	}
 }
@@ -203,7 +209,7 @@ func TestUserUseCase_Update_PartialFieldsLeaveOthersUnchanged(t *testing.T) {
 	uc, repo := newUserUseCaseForTest(t)
 	created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: "hash"})
 
-	updated, err := uc.Update(context.Background(), created.ID, "alice2", "", "")
+	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, "alice2", "", "")
 	if err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
@@ -217,7 +223,7 @@ func TestUserUseCase_Update_PartialFieldsLeaveOthersUnchanged(t *testing.T) {
 
 func TestUserUseCase_Get_NotFound(t *testing.T) {
 	uc, _ := newUserUseCaseForTest(t)
-	if _, err := uc.Get(context.Background(), 123); err == nil {
+	if _, err := uc.Get(context.Background(), domain.Claims{IsAdmin: true}, 123); err == nil {
 		t.Error("Get() for a missing user should return an error")
 	}
 }
@@ -239,7 +245,7 @@ func TestUserUseCase_Update_EnforcesConfiguredLengthPolicy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := uc.Update(context.Background(), created.ID, tt.username, "", tt.newPassword)
+			_, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, tt.username, "", tt.newPassword)
 			if !errors.Is(err, apperr.ErrValidation) {
 				t.Errorf("Update() error = %v, want apperr.ErrValidation", err)
 			}
@@ -257,7 +263,7 @@ func TestUserUseCase_Update_RejectsRenameToReservedAdminName(t *testing.T) {
 
 	for _, name := range []string{"admin", "Admin", "  ADMIN  "} {
 		t.Run(name, func(t *testing.T) {
-			_, err := uc.Update(context.Background(), created.ID, name, "", "")
+			_, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, name, "", "")
 			if !errors.Is(err, apperr.ErrConflict) {
 				t.Errorf("Update(%q) error = %v, want apperr.ErrConflict", name, err)
 			}
@@ -273,7 +279,7 @@ func TestUserUseCase_Update_RenameAllowedWithoutBootstrapAdmin(t *testing.T) {
 	uc, repo := newUserUseCaseForTest(t) // testUserConfig leaves AdminUsername empty
 	created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: "h"})
 
-	updated, err := uc.Update(context.Background(), created.ID, "admin", "", "")
+	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, "admin", "", "")
 	if err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
@@ -287,7 +293,7 @@ func TestUserUseCase_Update_OnlySuppliedFieldsAreSent(t *testing.T) {
 	uc := NewUserUseCase(repo, testHasher(t), testUserConfig(), silentLogger())
 	created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: "h"})
 
-	if _, err := uc.Update(context.Background(), created.ID, "", "new@example.com", ""); err != nil {
+	if _, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, "", "new@example.com", ""); err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
 
@@ -331,7 +337,7 @@ func TestUserUseCase_Update_CountsCharactersNotBytes(t *testing.T) {
 			uc, repo := newUserUseCaseForTest(t)
 			created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: "h"})
 
-			_, err := uc.Update(context.Background(), created.ID, tt.username, "", "")
+			_, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, tt.username, "", "")
 			if tt.wantErr {
 				if !errors.Is(err, apperr.ErrValidation) {
 					t.Errorf("Update(%d chars) error = %v, want apperr.ErrValidation", utf8.RuneCountInString(tt.username), err)
@@ -342,5 +348,64 @@ func TestUserUseCase_Update_CountsCharactersNotBytes(t *testing.T) {
 				t.Errorf("Update(%d chars) unexpected error: %v", utf8.RuneCountInString(tt.username), err)
 			}
 		})
+	}
+}
+
+// The DTO tag stops a malformed address at the HTTP edge. This is the same
+// rule one layer in, where it also applies to a caller that never went
+// through HTTP.
+func TestUseCases_RejectAMalformedEmailWithoutHelpFromTheTransport(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		email string
+		valid bool
+	}{
+		{name: "ordinary address", email: "mary@example.com", valid: true},
+		{name: "subdomain and plus tag", email: "mary+todo@mail.example.co.uk", valid: true},
+		{name: "no at sign", email: "mary.example.com"},
+		{name: "no domain", email: "mary@"},
+		{name: "no local part", email: "@example.com"},
+		{name: "a display name is not an address", email: "Mary <mary@example.com>"},
+		{name: "spaces", email: "mary @example.com"},
+		{name: "two addresses", email: "mary@example.com, eve@example.com"},
+		{name: "longer than any real address", email: strings.Repeat("a", 320) + "@example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			authUC, _, _ := newAuthUseCaseForTest(t, "", "")
+
+			_, err := authUC.Register(context.Background(), "mary", tc.email, "password123")
+			if tc.valid {
+				if err != nil {
+					t.Fatalf("Register() with %q: %v", tc.email, err)
+				}
+				return
+			}
+			if !errors.Is(err, apperr.ErrValidation) {
+				t.Errorf("Register() with %q = %v, want apperr.ErrValidation", tc.email, err)
+			}
+		})
+	}
+}
+
+func TestUserUseCase_Update_RejectsAMalformedEmail(t *testing.T) {
+	uc, repo := newUserUseCaseForTest(t)
+	seeded, err := repo.Create(context.Background(), domain.User{
+		Username: "mary", Email: "mary@example.com", PasswordHash: "hash",
+	})
+	if err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	_, err = uc.Update(context.Background(), domain.Claims{UserID: seeded.ID}, seeded.ID, "", "not-an-email", "")
+	if !errors.Is(err, apperr.ErrValidation) {
+		t.Errorf("Update() with a malformed email = %v, want apperr.ErrValidation", err)
+	}
+
+	stored, err := repo.GetByID(context.Background(), seeded.ID)
+	if err != nil {
+		t.Fatalf("GetByID(): %v", err)
+	}
+	if stored.Email != "mary@example.com" {
+		t.Errorf("the stored email became %q; a rejected update must change nothing", stored.Email)
 	}
 }

@@ -5,9 +5,12 @@ package postgres
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,20 +46,68 @@ func applyMigrations(t *testing.T, dsn string) {
 	}
 }
 
-func setupTestPool(t *testing.T) *pgxpool.Pool {
+func testPoolConfig() PoolConfig {
+	return PoolConfig{
+		MaxConns:       8,
+		MinConns:       1,
+		MaxConnLife:    time.Hour,
+		MaxConnIdle:    30 * time.Minute,
+		ConnectTimeout: 5 * time.Second,
+	}
+}
+
+func testDSN(t *testing.T) string {
 	t.Helper()
 
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
+		if os.Getenv("CI") != "" {
+			t.Fatal("TEST_DATABASE_URL is not set, but CI is: the integration job must run against a real database, not skip")
+		}
 		t.Skip("TEST_DATABASE_URL not set; skipping Postgres integration test")
 	}
+
+	requireTestDatabase(t, dsn)
+	return dsn
+}
+
+// Every test here starts by truncating the schema, so pointing the suite at
+// a development database costs its contents. The name has to say it is a
+// test database; TEST_DATABASE_ALLOW_ANY_NAME=1 is the deliberate override.
+func requireTestDatabase(t *testing.T, dsn string) {
+	t.Helper()
+
+	if os.Getenv("TEST_DATABASE_ALLOW_ANY_NAME") == "1" {
+		return
+	}
+
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("TEST_DATABASE_URL is not a URL: %v", err)
+	}
+
+	// A suffix, not a substring: "latest" contains "test" and is not a test
+	// database, and the cost of being wrong here is the contents of whatever
+	// the URL points at.
+	name := strings.TrimPrefix(parsed.Path, "/")
+	if !strings.HasSuffix(name, "_test") {
+		t.Fatalf("TEST_DATABASE_URL points at database %q, and these tests TRUNCATE every table. "+
+			"Use a database whose name ends in _test (for example %s_test), "+
+			"or set TEST_DATABASE_ALLOW_ANY_NAME=1 if you really mean this one.", name, name)
+	}
+}
+
+func setupTestPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+
+	dsn := testDSN(t)
 
 	applyMigrations(t, dsn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	pool, err := NewPool(ctx, dsn, 5*time.Second)
+	pool, err := NewPool(ctx, dsn, testPoolConfig())
 	if err != nil {
 		t.Fatalf("connect to test database: %v", err)
 	}
@@ -232,4 +283,222 @@ func TestUserRepository_List_EmptyIsNotAnError(t *testing.T) {
 	if len(users.Items) != 0 {
 		t.Fatalf("List() = %d users, want 0", len(users.Items))
 	}
+}
+
+func TestTaskRepository_UpdateWritesOnlyWhatWasSent(t *testing.T) {
+	pool := setupTestPool(t)
+	user := seedUser(t, pool, "alice")
+	repo := NewTaskRepository(pool)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name            string
+		update          domain.TaskUpdate
+		wantTitle       string
+		wantDescription string
+		wantStatus      domain.TaskStatus
+	}{
+		{
+			name:      "title alone leaves the description and the status",
+			update:    domain.TaskUpdate{Title: strPtr("renamed")},
+			wantTitle: "renamed", wantDescription: "original", wantStatus: domain.StatusInProgress,
+		},
+		{
+			name:      "an empty description really clears the column",
+			update:    domain.TaskUpdate{Description: strPtr("")},
+			wantTitle: "original title", wantDescription: "", wantStatus: domain.StatusInProgress,
+		},
+		{
+			name:      "status alone",
+			update:    domain.TaskUpdate{Status: taskStatusPtr(domain.StatusCompleted)},
+			wantTitle: "original title", wantDescription: "original", wantStatus: domain.StatusCompleted,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			task, err := repo.Create(ctx, domain.Task{
+				Title: "original title", Description: "original",
+				Status: domain.StatusInProgress, CreatorID: user.ID,
+			})
+			if err != nil {
+				t.Fatalf("Create(): %v", err)
+			}
+
+			if _, err := repo.Update(ctx, task.ID, user.ID, tc.update); err != nil {
+				t.Fatalf("Update(): %v", err)
+			}
+
+			stored, err := repo.GetByID(ctx, task.ID)
+			if err != nil {
+				t.Fatalf("GetByID(): %v", err)
+			}
+			if stored.Title != tc.wantTitle || stored.Description != tc.wantDescription || stored.Status != tc.wantStatus {
+				t.Errorf("stored = {%q, %q, %q}, want {%q, %q, %q}",
+					stored.Title, stored.Description, stored.Status,
+					tc.wantTitle, tc.wantDescription, tc.wantStatus)
+			}
+		})
+	}
+}
+
+func TestTaskRepository_UpdateForeignTaskIsNotFound(t *testing.T) {
+	pool := setupTestPool(t)
+	alice := seedUser(t, pool, "alice")
+	bob := seedUser(t, pool, "bob")
+	repo := NewTaskRepository(pool)
+	ctx := context.Background()
+
+	task, err := repo.Create(ctx, domain.Task{Title: "alice's", Status: domain.StatusCreated, CreatorID: alice.ID})
+	if err != nil {
+		t.Fatalf("Create(): %v", err)
+	}
+
+	if _, err := repo.Update(ctx, task.ID, bob.ID, domain.TaskUpdate{Title: strPtr("bob's now")}); !errors.Is(err, apperr.ErrNotFound) {
+		t.Fatalf("Update() by a stranger error = %v, want apperr.ErrNotFound", err)
+	}
+
+	stored, err := repo.GetByID(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetByID(): %v", err)
+	}
+	if stored.Title != "alice's" {
+		t.Errorf("Title = %q, want it untouched", stored.Title)
+	}
+}
+
+// Writing only what was sent is what makes this possible: with a
+// read-modify-write, whichever update committed second would have put the
+// other field back the way it read it.
+func TestConcurrent_TwoPartialUpdatesBothSurvive(t *testing.T) {
+	pool := setupTestPool(t)
+	user := seedUser(t, pool, "alice")
+	repo := NewTaskRepository(pool)
+	ctx := context.Background()
+
+	task, err := repo.Create(ctx, domain.Task{
+		Title: "before", Description: "before", Status: domain.StatusCreated, CreatorID: user.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(): %v", err)
+	}
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+
+	for _, update := range []domain.TaskUpdate{
+		{Title: strPtr("title from A")},
+		{Description: strPtr("description from B")},
+	} {
+		wg.Add(1)
+		go func(update domain.TaskUpdate) {
+			defer wg.Done()
+			<-start
+			if _, err := repo.Update(ctx, task.ID, user.ID, update); err != nil {
+				errs <- err
+			}
+		}(update)
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("Update(): %v", err)
+	}
+
+	stored, err := repo.GetByID(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetByID(): %v", err)
+	}
+	if stored.Title != "title from A" || stored.Description != "description from B" {
+		t.Errorf("stored = {%q, %q}, want both changes to have survived", stored.Title, stored.Description)
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+func taskStatusPtr(s domain.TaskStatus) *domain.TaskStatus { return &s }
+
+// pgx otherwise opens four connections per core and keeps them forever:
+// a number unrelated to what Postgres can serve, held across a restart of it.
+func TestNewPool_AppliesTheConfiguredBounds(t *testing.T) {
+	dsn := testDSN(t)
+
+	want := PoolConfig{
+		MaxConns:       3,
+		MinConns:       1,
+		MaxConnLife:    17 * time.Minute,
+		MaxConnIdle:    5 * time.Minute,
+		ConnectTimeout: 4 * time.Second,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := NewPool(ctx, dsn, want)
+	if err != nil {
+		t.Fatalf("NewPool(): %v", err)
+	}
+	defer pool.Close()
+
+	got := pool.Config()
+	switch {
+	case got.MaxConns != want.MaxConns:
+		t.Errorf("MaxConns = %d, want %d", got.MaxConns, want.MaxConns)
+	case got.MinConns != want.MinConns:
+		t.Errorf("MinConns = %d, want %d", got.MinConns, want.MinConns)
+	case got.MaxConnLifetime != want.MaxConnLife:
+		t.Errorf("MaxConnLifetime = %s, want %s", got.MaxConnLifetime, want.MaxConnLife)
+	case got.MaxConnIdleTime != want.MaxConnIdle:
+		t.Errorf("MaxConnIdleTime = %s, want %s", got.MaxConnIdleTime, want.MaxConnIdle)
+	case got.ConnConfig.ConnectTimeout != want.ConnectTimeout:
+		t.Errorf("ConnectTimeout = %s, want %s", got.ConnConfig.ConnectTimeout, want.ConnectTimeout)
+	}
+
+	if stat := pool.Stat(); stat.MaxConns() != want.MaxConns {
+		t.Errorf("the live pool reports MaxConns = %d, want %d", stat.MaxConns(), want.MaxConns)
+	}
+}
+
+// The ceiling has to be real: with three connections a fourth query waits
+// rather than opening a connection the database never agreed to.
+func TestNewPool_QueriesWaitForTheCeilingRatherThanExceedIt(t *testing.T) {
+	dsn := testDSN(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	pool, err := NewPool(ctx, dsn, PoolConfig{
+		MaxConns: 2, MinConns: 1,
+		MaxConnLife: time.Hour, MaxConnIdle: time.Minute, ConnectTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewPool(): %v", err)
+	}
+	defer pool.Close()
+
+	held := make([]*pgxpool.Conn, 0, 2)
+	for i := 0; i < 2; i++ {
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("acquire %d: %v", i+1, err)
+		}
+		held = append(held, conn)
+	}
+
+	full, cancelFull := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancelFull()
+	if _, err := pool.Acquire(full); err == nil {
+		t.Error("a third connection was handed out although the pool allows two")
+	}
+
+	held[0].Release()
+	freed, cancelFreed := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelFreed()
+	conn, err := pool.Acquire(freed)
+	if err != nil {
+		t.Fatalf("acquiring a released connection: %v", err)
+	}
+	conn.Release()
+	held[1].Release()
 }

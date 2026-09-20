@@ -37,7 +37,7 @@ func Auth(validator TokenValidator) fiber.Handler {
 			return fmt.Errorf("%w: empty bearer token", apperr.ErrUnauthorized)
 		}
 
-		claims, err := validator.ValidateToken(c.Context(), tokenString)
+		claims, err := validator.ValidateToken(c.UserContext(), tokenString)
 		if err != nil {
 			return err
 		}

@@ -4,6 +4,8 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"sync"
 	"testing"
@@ -36,11 +38,11 @@ func newSessionFixture(t *testing.T) sessionFixture {
 	users := NewUserRepository(pool)
 	refresh := NewRefreshTokenRepository(pool)
 
-	hasher, err := password.NewHasher(bcrypt.MinCost)
+	hasher, err := password.NewHasher(bcrypt.MinCost, 2)
 	if err != nil {
 		t.Fatalf("NewHasher(): %v", err)
 	}
-	hash, _ := hasher.Hash("s3cret-pass")
+	hash, _ := hasher.Hash(context.Background(), "s3cret-pass")
 	user, err := users.Create(context.Background(), domain.User{
 		Username: "alice", Email: "alice@example.com", PasswordHash: hash,
 	})
@@ -92,15 +94,23 @@ func (f sessionFixture) activeSessions(t *testing.T) int {
 }
 
 type barrierRefreshRepo struct {
-	domain.RefreshTokenRepository
+	usecase.SessionStore
 	beforeRotate func()
+	beforeCreate func()
 }
 
-func (r *barrierRefreshRepo) Rotate(ctx context.Context, presentedHash string, replacement domain.RefreshToken, now time.Time) (domain.RotateResult, error) {
+func (r *barrierRefreshRepo) Rotate(ctx context.Context, presentedHash string, replacement domain.RefreshToken) (domain.RotateResult, error) {
 	if r.beforeRotate != nil {
 		r.beforeRotate()
 	}
-	return r.RefreshTokenRepository.Rotate(ctx, presentedHash, replacement, now)
+	return r.SessionStore.Rotate(ctx, presentedHash, replacement)
+}
+
+func (r *barrierRefreshRepo) Create(ctx context.Context, token domain.RefreshToken, credentialsVersion int64) (domain.RefreshToken, error) {
+	if r.beforeCreate != nil {
+		r.beforeCreate()
+	}
+	return r.SessionStore.Create(ctx, token, credentialsVersion)
 }
 
 func TestConcurrentRefresh_OnlyOneCallerConsumesTheToken(t *testing.T) {
@@ -110,7 +120,7 @@ func TestConcurrentRefresh_OnlyOneCallerConsumesTheToken(t *testing.T) {
 	const callers = 6
 	var ready sync.WaitGroup
 	ready.Add(callers)
-	barrier := &barrierRefreshRepo{RefreshTokenRepository: f.refresh, beforeRotate: func() {
+	barrier := &barrierRefreshRepo{SessionStore: f.refresh, beforeRotate: func() {
 		ready.Done()
 		ready.Wait()
 	}}
@@ -146,8 +156,6 @@ func TestConcurrentRefresh_OnlyOneCallerConsumesTheToken(t *testing.T) {
 		t.Fatalf("%d callers exchanged the same refresh token, want exactly 1", won)
 	}
 
-	// The losers are treated as a replay, which ends every session of the
-	// account - including the one the winner had just been issued.
 	if active := f.activeSessions(t); active != 0 {
 		t.Errorf("%d sessions are still active after a detected replay, want 0", active)
 	}
@@ -160,7 +168,7 @@ func TestRefresh_FailedInsertLeavesThePresentedTokenUsable(t *testing.T) {
 
 	taken, err := f.refresh.Create(ctx, domain.RefreshToken{
 		UserID: f.user.ID, TokenHash: "already-taken", ExpiresAt: time.Now().Add(time.Hour),
-	})
+	}, 1)
 	if err != nil {
 		t.Fatalf("seed colliding token: %v", err)
 	}
@@ -168,7 +176,7 @@ func TestRefresh_FailedInsertLeavesThePresentedTokenUsable(t *testing.T) {
 	presentedHash := token.HashRefreshToken(tokens.RefreshToken)
 	_, err = f.refresh.Rotate(ctx, presentedHash, domain.RefreshToken{
 		TokenHash: taken.TokenHash, ExpiresAt: time.Now().Add(time.Hour),
-	}, time.Now())
+	})
 	if err == nil {
 		t.Fatal("rotating onto a hash that already exists should fail")
 	}
@@ -193,7 +201,7 @@ func TestRotationCrossingRevocation_NoLiveDescendantSurvives(t *testing.T) {
 	var bothInPosition sync.WaitGroup
 	bothInPosition.Add(2)
 
-	barrier := &barrierRefreshRepo{RefreshTokenRepository: f.refresh, beforeRotate: func() {
+	barrier := &barrierRefreshRepo{SessionStore: f.refresh, beforeRotate: func() {
 		bothInPosition.Done()
 		bothInPosition.Wait()
 	}}
@@ -215,7 +223,7 @@ func TestRotationCrossingRevocation_NoLiveDescendantSurvives(t *testing.T) {
 		defer done.Done()
 		bothInPosition.Done()
 		bothInPosition.Wait()
-		revokeErr = f.refresh.RevokeAllForUser(context.Background(), f.user.ID)
+		_, revokeErr = f.refresh.RevokeAllForUser(context.Background(), f.user.ID)
 	}()
 	done.Wait()
 
@@ -235,7 +243,7 @@ func TestPasswordChange_EndsExistingSessions(t *testing.T) {
 	ctx := context.Background()
 	tokens := f.login(t)
 
-	if _, err := f.userUC.Update(ctx, f.user.ID, "", "", "brand-new-password"); err != nil {
+	if _, err := f.userUC.Update(ctx, domain.Claims{UserID: f.user.ID}, f.user.ID, "", "", "brand-new-password"); err != nil {
 		t.Fatalf("change password: %v", err)
 	}
 
@@ -259,7 +267,7 @@ func TestPasswordChangeCrossingRotation_NoSessionOutlivesTheChange(t *testing.T)
 	var bothInPosition sync.WaitGroup
 	bothInPosition.Add(2)
 
-	barrier := &barrierRefreshRepo{RefreshTokenRepository: f.refresh, beforeRotate: func() {
+	barrier := &barrierRefreshRepo{SessionStore: f.refresh, beforeRotate: func() {
 		bothInPosition.Done()
 		bothInPosition.Wait()
 	}}
@@ -282,7 +290,7 @@ func TestPasswordChangeCrossingRotation_NoSessionOutlivesTheChange(t *testing.T)
 		defer done.Done()
 		bothInPosition.Done()
 		bothInPosition.Wait()
-		_, changeErr = f.userUC.Update(context.Background(), f.user.ID, "", "", "brand-new-password")
+		_, changeErr = f.userUC.Update(context.Background(), domain.Claims{UserID: f.user.ID}, f.user.ID, "", "", "brand-new-password")
 	}()
 	done.Wait()
 
@@ -368,7 +376,7 @@ func TestPasswordChange_WaitsForWhoeverHoldsTheUserRow(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := f.userUC.Update(context.Background(), f.user.ID, "", "", "brand-new-password")
+		_, err := f.userUC.Update(context.Background(), domain.Claims{UserID: f.user.ID}, f.user.ID, "", "", "brand-new-password")
 		result <- err
 	}()
 
@@ -394,7 +402,7 @@ func TestPasswordChange_FailedUpdateKeepsSessions(t *testing.T) {
 	ctx := context.Background()
 	f.login(t)
 
-	taken, err := f.hasher.Hash("another-password")
+	taken, err := f.hasher.Hash(context.Background(), "another-password")
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
@@ -409,7 +417,7 @@ func TestPasswordChange_FailedUpdateKeepsSessions(t *testing.T) {
 		t.Fatal("the fixture should start with one active session")
 	}
 
-	_, err = f.userUC.Update(ctx, f.user.ID, "bob", "", "brand-new-password")
+	_, err = f.userUC.Update(ctx, domain.Claims{UserID: f.user.ID}, f.user.ID, "bob", "", "brand-new-password")
 	if !errors.Is(err, apperr.ErrConflict) {
 		t.Fatalf("Update() error = %v, want apperr.ErrConflict", err)
 	}
@@ -421,4 +429,308 @@ func TestPasswordChange_FailedUpdateKeepsSessions(t *testing.T) {
 	if _, _, err := f.auth.Login(ctx, "alice", "s3cret-pass"); err != nil {
 		t.Errorf("the old password must still work after a rejected change: %v", err)
 	}
+}
+
+func (f sessionFixture) loginWith(t *testing.T, refresh usecase.SessionStore) (domain.Tokens, error) {
+	t.Helper()
+
+	tokenSvc, err := token.NewService("0123456789abcdef0123456789abcdef", time.Hour, "to-do-list", 32)
+	if err != nil {
+		t.Fatalf("token.NewService(): %v", err)
+	}
+
+	auth := usecase.NewAuthUseCase(f.users, tokenSvc, refresh, token.NewIssuer(), f.hasher, usecase.AuthConfig{
+		Timeout: 10 * time.Second, MinUsernameLength: 3, MaxUsernameLength: 50,
+		MinPasswordLength: 8, RefreshTTL: 720 * time.Hour,
+	}, testLogger())
+
+	tokens, _, err := auth.Login(context.Background(), "alice", "s3cret-pass")
+	return tokens, err
+}
+
+func TestLogin_CannotStoreASessionForAPasswordThatHasBeenReplaced(t *testing.T) {
+	f := newSessionFixture(t)
+	ctx := context.Background()
+
+	verified := make(chan struct{})
+	changed := make(chan struct{})
+
+	barrier := &barrierRefreshRepo{
+		SessionStore: f.refresh,
+		beforeCreate: func() {
+			close(verified)
+			<-changed
+		},
+	}
+
+	var loginErr error
+	var done sync.WaitGroup
+	done.Add(1)
+	go func() {
+		defer done.Done()
+		_, loginErr = f.loginWith(t, barrier)
+	}()
+
+	// The login has verified the old password and is about to store its
+	// session. Change the password underneath it.
+	<-verified
+	if _, err := f.userUC.Update(ctx, domain.Claims{UserID: f.user.ID}, f.user.ID, "", "", "a-brand-new-password"); err != nil {
+		t.Fatalf("change password: %v", err)
+	}
+	close(changed)
+	done.Wait()
+
+	if !errors.Is(loginErr, apperr.ErrInvalidCredentials) {
+		t.Fatalf("Login() error = %v, want apperr.ErrInvalidCredentials", loginErr)
+	}
+
+	if active := f.activeSessions(t); active != 0 {
+		t.Errorf("%d sessions survived the password change, want 0", active)
+	}
+}
+
+func TestLogin_StoresASessionWhenThePasswordIsUnchanged(t *testing.T) {
+	f := newSessionFixture(t)
+
+	if _, err := f.loginWith(t, f.refresh); err != nil {
+		t.Fatalf("Login(): %v", err)
+	}
+
+	if active := f.activeSessions(t); active != 1 {
+		t.Errorf("active sessions = %d, want 1", active)
+	}
+}
+
+func TestLogin_AfterAPasswordChangeOpensAFreshSession(t *testing.T) {
+	f := newSessionFixture(t)
+	ctx := context.Background()
+
+	f.login(t)
+
+	if _, err := f.userUC.Update(ctx, domain.Claims{UserID: f.user.ID}, f.user.ID, "", "", "a-brand-new-password"); err != nil {
+		t.Fatalf("change password: %v", err)
+	}
+	if active := f.activeSessions(t); active != 0 {
+		t.Fatalf("the password change left %d sessions, want 0", active)
+	}
+
+	tokens, _, err := f.auth.Login(ctx, "alice", "a-brand-new-password")
+	if err != nil {
+		t.Fatalf("Login() with the new password: %v", err)
+	}
+	if tokens.RefreshToken == "" {
+		t.Error("the new login got no refresh token")
+	}
+	if active := f.activeSessions(t); active != 1 {
+		t.Errorf("active sessions = %d, want 1", active)
+	}
+}
+
+func TestRotate_RejectsATokenThatExpiredWhileWaitingForTheLock(t *testing.T) {
+	f := newSessionFixture(t)
+	ctx := context.Background()
+
+	// A session that is still valid now and lapses shortly.
+	const lifetime = 600 * time.Millisecond
+	plain, hash, err := token.NewIssuer().NewRefreshToken()
+	if err != nil {
+		t.Fatalf("new refresh token: %v", err)
+	}
+	if _, err := f.refresh.Create(ctx, domain.RefreshToken{
+		UserID: f.user.ID, TokenHash: hash, ExpiresAt: time.Now().Add(lifetime),
+	}, f.user.CredentialsVersion); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	release := lockUserRow(t, f)
+
+	rotateStarted := make(chan struct{})
+	rotateDone := make(chan error, 1)
+	go func() {
+		close(rotateStarted)
+		_, err := f.auth.Refresh(context.Background(), plain)
+		rotateDone <- err
+	}()
+
+	// Let the rotation reach the lock, then hold it until the token has
+	// certainly lapsed.
+	<-rotateStarted
+	time.Sleep(lifetime + 200*time.Millisecond)
+	release(false)
+
+	err = <-rotateDone
+	if !errors.Is(err, apperr.ErrUnauthorized) {
+		t.Fatalf("Refresh() error = %v, want apperr.ErrUnauthorized - the token expired while it waited", err)
+	}
+
+	var issued int
+	if err := f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM refresh_tokens WHERE user_id = $1 AND token_hash <> $2`,
+		f.user.ID, hash).Scan(&issued); err != nil {
+		t.Fatalf("count tokens: %v", err)
+	}
+	if issued != 0 {
+		t.Errorf("the rejected rotation still issued %d tokens, want 0", issued)
+	}
+}
+
+func TestRotate_AcceptsATokenThatIsStillInDateWhenTheLockIsGranted(t *testing.T) {
+	f := newSessionFixture(t)
+
+	tokens := f.login(t)
+	release := lockUserRow(t, f)
+
+	rotateStarted := make(chan struct{})
+	rotateDone := make(chan error, 1)
+	go func() {
+		close(rotateStarted)
+		_, err := f.auth.Refresh(context.Background(), tokens.RefreshToken)
+		rotateDone <- err
+	}()
+
+	<-rotateStarted
+	time.Sleep(300 * time.Millisecond)
+	release(false)
+
+	if err := <-rotateDone; err != nil {
+		t.Fatalf("Refresh() after waiting for the lock: %v", err)
+	}
+	if active := f.activeSessions(t); active != 1 {
+		t.Errorf("active sessions = %d, want 1", active)
+	}
+}
+
+func holdUserRowThenChangeCredentials(t *testing.T, f sessionFixture) (release func()) {
+	t.Helper()
+	ctx := context.Background()
+
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	var id int64
+	if err := tx.QueryRow(ctx, `SELECT id FROM users WHERE id = $1 FOR UPDATE`, f.user.ID).Scan(&id); err != nil {
+		t.Fatalf("lock user row: %v", err)
+	}
+
+	return func() {
+		if _, err := tx.Exec(ctx,
+			`UPDATE users SET credentials_version = credentials_version + 1 WHERE id = $1`, f.user.ID); err != nil {
+			t.Errorf("bump credentials version: %v", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`,
+			f.user.ID); err != nil {
+			t.Errorf("revoke inside the held transaction: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Errorf("commit: %v", err)
+		}
+	}
+}
+
+func TestLogin_WaitsForAnInFlightPasswordChange(t *testing.T) {
+	f := newSessionFixture(t)
+
+	release := holdUserRowThenChangeCredentials(t, f)
+
+	loginDone := make(chan error, 1)
+	go func() {
+		_, err := f.loginWith(t, f.refresh)
+		loginDone <- err
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case err := <-loginDone:
+		t.Fatalf("Login() finished with %v while the password change was still open - it did not wait for the lock", err)
+	default:
+	}
+
+	release()
+
+	if err := <-loginDone; !errors.Is(err, apperr.ErrInvalidCredentials) {
+		t.Fatalf("Login() error = %v, want apperr.ErrInvalidCredentials", err)
+	}
+	if active := f.activeSessions(t); active != 0 {
+		t.Errorf("%d sessions survived the password change, want 0", active)
+	}
+}
+
+// Replaying a consumed token is the one event that ends every session of the
+// account. Detecting it and acting on it are now one transaction under the
+// same lock on the user row: before, the use case made a second call, and if
+// that call failed the client still got the ordinary 401 while the other
+// sessions stayed alive.
+func TestRotate_ReplayEndsEverySessionInTheSameTransaction(t *testing.T) {
+	f := newSessionFixture(t)
+	ctx := context.Background()
+
+	// Three live sessions, one of which is about to be replayed.
+	replayed := f.login(t)
+	second := f.login(t)
+	third := f.login(t)
+
+	rotated, err := f.auth.Refresh(ctx, replayed.RefreshToken)
+	if err != nil {
+		t.Fatalf("first Refresh(): %v", err)
+	}
+
+	live := countLiveSessions(t, f.pool, f.user.ID)
+	if live != 3 {
+		t.Fatalf("%d live sessions before the replay, want 3", live)
+	}
+
+	// The same token again: a stolen copy, or a retry that lost the race.
+	result, err := f.refresh.Rotate(ctx, sha256Hex(replayed.RefreshToken), domain.RefreshToken{
+		TokenHash: "a-brand-new-hash",
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+
+	if !errors.Is(err, apperr.ErrTokenReuse) {
+		t.Fatalf("Rotate() on a replay = %v, want apperr.ErrTokenReuse", err)
+	}
+	if errors.Is(err, apperr.ErrConflict) {
+		t.Error("a replay must not be indistinguishable from a hash collision")
+	}
+	if result.UserID != f.user.ID {
+		t.Errorf("UserID = %d, want %d - the caller cannot report what it does not know", result.UserID, f.user.ID)
+	}
+	if result.SessionsRevoked != 3 {
+		t.Errorf("SessionsRevoked = %d, want 3", result.SessionsRevoked)
+	}
+
+	if live := countLiveSessions(t, f.pool, f.user.ID); live != 0 {
+		t.Errorf("%d sessions are still live after the replay, want 0", live)
+	}
+
+	// And every token that existed is now useless, including the one the
+	// first rotation had just issued.
+	for name, refreshToken := range map[string]string{
+		"the token issued by the rotation": rotated.RefreshToken,
+		"a second session":                 second.RefreshToken,
+		"a third session":                  third.RefreshToken,
+	} {
+		if _, err := f.auth.Refresh(ctx, refreshToken); err == nil {
+			t.Errorf("%s still works after the replay", name)
+		}
+	}
+}
+
+func countLiveSessions(t *testing.T, pool *pgxpool.Pool, userID int64) int {
+	t.Helper()
+
+	var live int
+	err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL`, userID).Scan(&live)
+	if err != nil {
+		t.Fatalf("count live sessions: %v", err)
+	}
+	return live
+}
+
+func sha256Hex(plain string) string {
+	sum := sha256.Sum256([]byte(plain))
+	return hex.EncodeToString(sum[:])
 }

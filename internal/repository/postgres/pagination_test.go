@@ -252,7 +252,7 @@ func TestRefreshTokenRepository_Lifecycle(t *testing.T) {
 		UserID:    user.ID,
 		TokenHash: "hash-1",
 		ExpiresAt: time.Now().Add(time.Hour),
-	})
+	}, 1)
 	if err != nil {
 		t.Fatalf("Create(): %v", err)
 	}
@@ -292,12 +292,16 @@ func TestRefreshTokenRepository_RevokeAllAndCleanup(t *testing.T) {
 	ctx := context.Background()
 
 	for _, hash := range []string{"a1", "a2"} {
-		repo.Create(ctx, domain.RefreshToken{UserID: alice.ID, TokenHash: hash, ExpiresAt: time.Now().Add(time.Hour)})
+		repo.Create(ctx, domain.RefreshToken{UserID: alice.ID, TokenHash: hash, ExpiresAt: time.Now().Add(time.Hour)}, 1)
 	}
-	repo.Create(ctx, domain.RefreshToken{UserID: bob.ID, TokenHash: "b1", ExpiresAt: time.Now().Add(time.Hour)})
+	repo.Create(ctx, domain.RefreshToken{UserID: bob.ID, TokenHash: "b1", ExpiresAt: time.Now().Add(time.Hour)}, 1)
 
-	if err := repo.RevokeAllForUser(ctx, alice.ID); err != nil {
+	revoked, err := repo.RevokeAllForUser(ctx, alice.ID)
+	if err != nil {
 		t.Fatalf("RevokeAllForUser(): %v", err)
+	}
+	if revoked != 2 {
+		t.Errorf("RevokeAllForUser() reported %d sessions, want 2", revoked)
 	}
 	for _, hash := range []string{"a1", "a2"} {
 		token, _ := repo.GetByHash(ctx, hash)
@@ -310,7 +314,7 @@ func TestRefreshTokenRepository_RevokeAllAndCleanup(t *testing.T) {
 		t.Error("another user's session must not be revoked")
 	}
 
-	repo.Create(ctx, domain.RefreshToken{UserID: bob.ID, TokenHash: "expired", ExpiresAt: time.Now().Add(-time.Hour)})
+	repo.Create(ctx, domain.RefreshToken{UserID: bob.ID, TokenHash: "expired", ExpiresAt: time.Now().Add(-time.Hour)}, 1)
 	removed, err := repo.DeleteExpired(ctx, time.Now())
 	if err != nil {
 		t.Fatalf("DeleteExpired(): %v", err)
@@ -327,7 +331,7 @@ func TestRefreshTokensAreRemovedWithTheirUser(t *testing.T) {
 	users := NewUserRepository(pool)
 	ctx := context.Background()
 
-	tokens.Create(ctx, domain.RefreshToken{UserID: user.ID, TokenHash: "h", ExpiresAt: time.Now().Add(time.Hour)})
+	tokens.Create(ctx, domain.RefreshToken{UserID: user.ID, TokenHash: "h", ExpiresAt: time.Now().Add(time.Hour)}, 1)
 
 	if err := users.Delete(ctx, user.ID); err != nil {
 		t.Fatalf("Delete(): %v", err)

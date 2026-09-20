@@ -1,0 +1,137 @@
+# Application configuration - every non-secret setting the service reads.
+#
+# Resolution order, lowest priority first:
+#   1. this file
+#   2. .env (git-ignored)
+#   3. real environment variables (what docker-compose.yml sets)
+#
+# There are no defaults compiled into the Go code: if a key below is deleted
+# and no environment variable supplies it, the service refuses to start and
+# names the missing key. Secrets are the exception - they are never read from
+# this file, only from .env or the environment:
+#
+#   DB_PASSWORD           Postgres password
+#   JWT_SECRET            JWT signing secret (at least jwt.min_secret_length)
+#   ADMIN_USERNAME        optional superadmin login (empty = disabled)
+#   ADMIN_PASSWORD_HASH   its bcrypt hash: make gen-admin-hash pass='...'
+
+app:
+  name: to-do-list
+  env: development
+
+server:
+  address: ":8080"
+  read_timeout: 10s
+  write_timeout: 10s
+  # Grace period for in-flight requests after SIGINT/SIGTERM.
+  shutdown_timeout: 15s
+  # Largest request body accepted, in bytes. Anything bigger is refused with
+  # 413 before a handler sees it, so one caller cannot buy memory with a
+  # single POST. 1 MiB is far above any request this API defines.
+  max_body_bytes: 1048576
+  # Behind a reverse proxy the connection always comes from the proxy, so
+  # every caller would share one rate-limit bucket. Naming the proxies here
+  # and setting proxy_header makes the service read the real client address
+  # from that header - but only when the connection really came from one of
+  # them, since the header itself is client-supplied. Leave both empty when
+  # the service is exposed directly.
+  trusted_proxies: ""
+  proxy_header: ""
+
+db:
+  host: localhost
+  port: 5432
+  name: to_do
+  user: postgres
+  sslmode: disable
+  # Startup ping: how long to wait for Postgres before failing fast.
+  connect_timeout: 5s
+  # Upper bound on every individual database call made by a use case, so a
+  # wedged query cannot hang a request forever.
+  call_timeout: 5s
+  # Pool bounds. max_connections is the hard ceiling on concurrent queries:
+  # requests beyond it wait for a free connection rather than piling onto the
+  # database, and it must stay below Postgres' own max_connections, shared
+  # with every other client. min_connections keeps a few open so a quiet
+  # period is not followed by a burst of handshakes.
+  max_connections: 10
+  min_connections: 2
+  # Connections are recycled even when healthy, so a pool cannot sit on the
+  # far side of a restarted database or a load balancer that moved.
+  max_conn_lifetime: 1h
+  max_conn_idle_time: 30m
+
+jwt:
+  ttl: 1h
+  refresh_ttl: 720h
+  issuer: to-do-list
+  # 32 bytes matches HMAC-SHA256's output size, the usual lower bound for an
+  # HS256 secret. The service refuses to start with a shorter JWT_SECRET.
+  min_secret_length: 32
+
+password:
+  # bcrypt work factor. Higher is slower to crack and slower to log in with.
+  bcrypt_cost: 12
+  min_length: 8
+  # bcrypt is deliberately expensive: at cost 12 one hash costs a core about
+  # a quarter of a second. Without a ceiling, enough simultaneous logins
+  # starve every other request of CPU, so hashing and verification queue
+  # behind this many slots. Set it to roughly the number of cores the process
+  # is given; callers that wait longer than db.call_timeout are turned away.
+  max_concurrent_hashes: 4
+
+user:
+  min_username_length: 3
+  max_username_length: 50
+
+task:
+  max_title_length: 200
+  max_description_length: 4000
+
+pagination:
+  default_page_size: 20
+  max_page_size: 100
+
+cleanup:
+  # How often expired refresh tokens are swept out of the table.
+  interval: 1h
+  # Expired rows are kept this long before deletion: replaying a token that
+  # has already been consumed must still be recognisable as reuse, and a row
+  # that is gone looks merely unknown.
+  refresh_token_retention: 720h
+
+ratelimit:
+  # Applied to /auth/register and /auth/login only, to slow down online
+  # password guessing.
+  auth_max_requests: 20
+  auth_window: 1m
+
+cors:
+  allow_origins: "*"
+  allow_methods: "GET, POST, PATCH, DELETE, OPTIONS"
+  allow_headers: "Origin, Content-Type, Accept, Authorization"
+
+health:
+  # Budget for each dependency probe behind GET /readyz.
+  ready_timeout: 2s
+
+observability:
+  # Serves the Prometheus text exposition format on metrics_path. The endpoint
+  # is unauthenticated, so keep it on an internal network or behind an ingress
+  # rule rather than exposing it publicly.
+  metrics_enabled: true
+  metrics_path: /metrics
+  # Prefixed to every metric name: todo_http_requests_total, and so on.
+  metrics_namespace: todo
+  # Moves /metrics to its own listener, which docker-compose.yml does not
+  # publish: Prometheus reaches it over the internal network and nothing
+  # outside can. Empty serves it on the public listener instead, which is a
+  # local convenience only - the endpoint has no authentication.
+  metrics_address: ""
+
+log:
+  level: info
+  format: json
+
+run_migrations: true
+migrations_path: migrations

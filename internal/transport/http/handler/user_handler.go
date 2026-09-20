@@ -12,12 +12,12 @@ import (
 )
 
 type UserHandler struct {
-	users    domain.UserService
+	users    UserService
 	validate *validator.Validate
 }
 
-func NewUserHandler(users domain.UserService) *UserHandler {
-	return &UserHandler{users: users, validate: validator.New()}
+func NewUserHandler(users UserService) *UserHandler {
+	return &UserHandler{users: users, validate: newValidator()}
 }
 
 func (h *UserHandler) Mount(router fiber.Router) {
@@ -35,20 +35,10 @@ func (h *UserHandler) claims(c *fiber.Ctx) (domain.Claims, error) {
 	return claims, nil
 }
 
-func (h *UserHandler) requireSelfOrAdmin(claims domain.Claims, id int64) error {
-	if claims.IsAdmin || claims.UserID == id {
-		return nil
-	}
-	return apperr.ErrForbidden
-}
-
 func (h *UserHandler) List(c *fiber.Ctx) error {
 	claims, err := h.claims(c)
 	if err != nil {
 		return err
-	}
-	if !claims.IsAdmin {
-		return apperr.ErrForbidden
 	}
 
 	page, err := parsePageParams(c)
@@ -56,7 +46,7 @@ func (h *UserHandler) List(c *fiber.Ctx) error {
 		return err
 	}
 
-	users, err := h.users.List(c.Context(), page)
+	users, err := h.users.List(c.UserContext(), claims, page)
 	if err != nil {
 		return err
 	}
@@ -75,11 +65,7 @@ func (h *UserHandler) Get(c *fiber.Ctx) error {
 		return err
 	}
 
-	if err := h.requireSelfOrAdmin(claims, id); err != nil {
-		return err
-	}
-
-	user, err := h.users.Get(c.Context(), id)
+	user, err := h.users.Get(c.UserContext(), claims, id)
 	if err != nil {
 		return err
 	}
@@ -98,10 +84,6 @@ func (h *UserHandler) Update(c *fiber.Ctx) error {
 		return err
 	}
 
-	if err := h.requireSelfOrAdmin(claims, id); err != nil {
-		return err
-	}
-
 	var req dto.UpdateUserRequest
 	if err := c.BodyParser(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
@@ -110,7 +92,7 @@ func (h *UserHandler) Update(c *fiber.Ctx) error {
 		return err
 	}
 
-	user, err := h.users.Update(c.Context(), id, req.Username, req.Email, req.Password)
+	user, err := h.users.Update(c.UserContext(), claims, id, req.Username, req.Email, req.Password)
 	if err != nil {
 		return err
 	}
@@ -129,11 +111,7 @@ func (h *UserHandler) Delete(c *fiber.Ctx) error {
 		return err
 	}
 
-	if err := h.requireSelfOrAdmin(claims, id); err != nil {
-		return err
-	}
-
-	if err := h.users.Delete(c.Context(), id); err != nil {
+	if err := h.users.Delete(c.UserContext(), claims, id); err != nil {
 		return err
 	}
 

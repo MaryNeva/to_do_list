@@ -43,25 +43,46 @@ func NewRefreshTokenRepository(pool *pgxpool.Pool) *RefreshTokenRepository {
 	return &RefreshTokenRepository{pool: pool}
 }
 
-var _ domain.RefreshTokenRepository = (*RefreshTokenRepository)(nil)
+func (r *RefreshTokenRepository) Create(ctx context.Context, token domain.RefreshToken, credentialsVersion int64) (domain.RefreshToken, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.RefreshToken{}, fmt.Errorf("postgres: begin create refresh token: %w", err)
+	}
+	defer tx.Rollback(ctx)
 
-func (r *RefreshTokenRepository) Create(ctx context.Context, token domain.RefreshToken) (domain.RefreshToken, error) {
+	var currentVersion int64
+	err = tx.QueryRow(ctx,
+		`SELECT credentials_version FROM users WHERE id = $1 FOR SHARE`, token.UserID).Scan(&currentVersion)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.RefreshToken{}, apperr.ErrNotFound
+		}
+		return domain.RefreshToken{}, fmt.Errorf("postgres: lock user for session: %w", err)
+	}
+
+	if currentVersion != credentialsVersion {
+		return domain.RefreshToken{}, apperr.ErrConflict
+	}
+
 	query := `INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
 	          VALUES ($1, $2, $3)
 	          RETURNING ` + refreshTokenColumns
 
-	rows, err := r.pool.Query(ctx, query, token.UserID, token.TokenHash, token.ExpiresAt)
+	rows, err := tx.Query(ctx, query, token.UserID, token.TokenHash, token.ExpiresAt)
 	if err != nil {
 		return domain.RefreshToken{}, fmt.Errorf("postgres: insert refresh token: %w", err)
 	}
-	defer rows.Close()
-
 	model, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByName[refreshTokenModel])
+	rows.Close()
 	if err != nil {
 		if isUniqueViolation(err) {
 			return domain.RefreshToken{}, apperr.ErrConflict
 		}
 		return domain.RefreshToken{}, fmt.Errorf("postgres: scan created refresh token: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return domain.RefreshToken{}, fmt.Errorf("postgres: commit create refresh token: %w", err)
 	}
 
 	return model.toDomain(), nil
@@ -99,15 +120,23 @@ func (r *RefreshTokenRepository) Revoke(ctx context.Context, hash string) error 
 	return nil
 }
 
-func (r *RefreshTokenRepository) RevokeAllForUser(ctx context.Context, userID int64) error {
-	return r.inUserLock(ctx, userID, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
+func (r *RefreshTokenRepository) RevokeAllForUser(ctx context.Context, userID int64) (int64, error) {
+	var revoked int64
+
+	err := r.inUserLock(ctx, userID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
 			`UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, userID)
 		if err != nil {
 			return fmt.Errorf("postgres: revoke refresh tokens of user: %w", err)
 		}
+		revoked = tag.RowsAffected()
 		return nil
 	})
+	if err != nil {
+		return 0, err
+	}
+
+	return revoked, nil
 }
 
 func (r *RefreshTokenRepository) inUserLock(ctx context.Context, userID int64, fn func(pgx.Tx) error) error {
@@ -147,7 +176,6 @@ func (r *RefreshTokenRepository) Rotate(
 	ctx context.Context,
 	presentedHash string,
 	replacement domain.RefreshToken,
-	now time.Time,
 ) (domain.RotateResult, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -164,8 +192,13 @@ func (r *RefreshTokenRepository) Rotate(
 		return domain.RotateResult{}, fmt.Errorf("postgres: look up refresh token: %w", err)
 	}
 
-	var locked int64
-	if err := tx.QueryRow(ctx, `SELECT id FROM users WHERE id = $1 FOR UPDATE`, ownerID).Scan(&locked); err != nil {
+	var owner struct {
+		id       int64
+		username string
+	}
+	err = tx.QueryRow(ctx,
+		`SELECT id, username FROM users WHERE id = $1 FOR UPDATE`, ownerID).Scan(&owner.id, &owner.username)
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.RotateResult{}, apperr.ErrNotFound
 		}
@@ -173,9 +206,9 @@ func (r *RefreshTokenRepository) Rotate(
 	}
 
 	consumeRows, err := tx.Query(ctx, `UPDATE refresh_tokens
-	          SET revoked_at = $2
-	          WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > $2
-	          RETURNING `+refreshTokenColumns, presentedHash, now)
+	          SET revoked_at = clock_timestamp()
+	          WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > clock_timestamp()
+	          RETURNING `+refreshTokenColumns, presentedHash)
 	if err != nil {
 		return domain.RotateResult{}, fmt.Errorf("postgres: consume refresh token: %w", err)
 	}
@@ -185,7 +218,18 @@ func (r *RefreshTokenRepository) Rotate(
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return domain.RotateResult{}, fmt.Errorf("postgres: scan consumed refresh token: %w", err)
 		}
-		return domain.RotateResult{UserID: ownerID}, r.classifyUnusable(ctx, tx, presentedHash, now)
+
+		revoked, reason := r.handleUnusable(ctx, tx, presentedHash, ownerID)
+		if errors.Is(reason, apperr.ErrTokenReuse) {
+			if err := tx.Commit(ctx); err != nil {
+				return domain.RotateResult{}, fmt.Errorf("postgres: commit revocation after refresh token reuse: %w", err)
+			}
+		}
+		return domain.RotateResult{
+			UserID:          ownerID,
+			Username:        owner.username,
+			SessionsRevoked: revoked,
+		}, reason
 	}
 
 	issuedRows, err := tx.Query(ctx, `INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
@@ -208,24 +252,34 @@ func (r *RefreshTokenRepository) Rotate(
 		return domain.RotateResult{}, fmt.Errorf("postgres: commit rotate: %w", err)
 	}
 
-	return domain.RotateResult{Issued: issued.toDomain(), UserID: consumed.UserID}, nil
+	return domain.RotateResult{
+		Issued:   issued.toDomain(),
+		UserID:   consumed.UserID,
+		Username: owner.username,
+	}, nil
 }
 
-func (r *RefreshTokenRepository) classifyUnusable(ctx context.Context, tx pgx.Tx, hash string, now time.Time) error {
-	var revokedAt *time.Time
-	var expiresAt time.Time
+func (r *RefreshTokenRepository) handleUnusable(ctx context.Context, tx pgx.Tx, hash string, ownerID int64) (int64, error) {
+	var revoked, expired bool
 	err := tx.QueryRow(ctx,
-		`SELECT revoked_at, expires_at FROM refresh_tokens WHERE token_hash = $1`, hash).Scan(&revokedAt, &expiresAt)
+		`SELECT revoked_at IS NOT NULL, expires_at <= clock_timestamp()
+		 FROM refresh_tokens WHERE token_hash = $1`, hash).Scan(&revoked, &expired)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return apperr.ErrNotFound
+		return 0, apperr.ErrNotFound
 	case err != nil:
-		return fmt.Errorf("postgres: inspect refresh token: %w", err)
-	case revokedAt != nil:
-		return apperr.ErrConflict
-	case !expiresAt.After(now):
-		return fmt.Errorf("%w: refresh token expired", apperr.ErrUnauthorized)
-	default:
-		return fmt.Errorf("%w: refresh token is not usable", apperr.ErrUnauthorized)
+		return 0, fmt.Errorf("postgres: inspect refresh token: %w", err)
+	case !revoked && expired:
+		return 0, fmt.Errorf("%w: refresh token expired", apperr.ErrUnauthorized)
+	case !revoked:
+		return 0, fmt.Errorf("%w: refresh token is not usable", apperr.ErrUnauthorized)
 	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, ownerID)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: revoke sessions after refresh token reuse: %w", err)
+	}
+
+	return tag.RowsAffected(), apperr.ErrTokenReuse
 }

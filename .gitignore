@@ -10,6 +10,9 @@
 coverage.out
 coverage.html
 
+# Claude desktop drop folder
+Claude outputs/
+
 # Editor / IDE
 .idea/
 .vscode/
@@ -18,4 +21,43 @@ coverage.html
 # OS
 .DS_Store
 
-config.yaml
+# Local Go workspace (machine-specific module replacements)
+go.work
+go.work.sum
+
+# Local archives used to move files around
+*.tgz
+*.tar.gz
+
+
+
+# Secrets and local environment
+.env.*
+!.env.example
+!.env.*.example
+http-client.private.env.json
+
+# Build artifacts
+
+/dist/
+*.test
+
+# Test results and profiling
+/coverage/
+*.prof
+
+# Runtime logs
+/logs/
+*.log
+
+# IDE and HTTP client history
+.http-client/
+*.swo
+*~
+
+# macOS
+._*
+
+# Local backups and private credentials, if used
+/backups/
+/secrets/

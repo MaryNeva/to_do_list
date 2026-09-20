@@ -16,7 +16,7 @@ func New(w io.Writer, level, format string) *slog.Logger {
 		handler = slog.NewJSONHandler(w, opts)
 	}
 
-	return slog.New(handler)
+	return slog.New(contextHandler{Handler: handler})
 }
 
 func parseLevel(level string) slog.Level {

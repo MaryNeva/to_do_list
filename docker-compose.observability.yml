@@ -1,0 +1,58 @@
+# Prometheus and Grafana, merged onto docker-compose.yml on request:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+#   make observability-up
+#
+# GRAFANA_PASSWORD is required and has no default. Keeping these services out
+# of the base file is what stops that requirement from blocking a plain
+# "docker compose up" of the API, since Compose interpolates a whole file
+# regardless of which services are started.
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: todo_prometheus
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_started
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./deployments/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - todo_prometheus_data:/prometheus
+    ports:
+      # Prometheus has no authentication of its own, and its API can read
+      # every series it holds.
+      - "${BIND_HOST:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: todo_grafana
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_started
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      # No default on purpose: a password that ships in a repository is not a
+      # password, and this one guards every dashboard and data source.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Opening the dashboards without a login is a local convenience, so it
+      # is opt-in: GRAFANA_ANONYMOUS=true in .env, and only ever with
+      # BIND_HOST left at 127.0.0.1.
+      GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_ANONYMOUS:-false}
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./deployments/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deployments/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - todo_grafana_data:/var/lib/grafana
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
+
+volumes:
+  todo_prometheus_data:
+  todo_grafana_data:

@@ -20,7 +20,7 @@ Authorization: Bearer {{token}}
 GET {{api}}/tasks/1
 Authorization: Bearer {{token}}
 
-### Update a task
+### Update a task - only what is sent is written
 PATCH {{api}}/tasks/1
 Content-Type: application/json
 Authorization: Bearer {{token}}
@@ -30,7 +30,35 @@ Authorization: Bearer {{token}}
   "description": "the barista kind"
 }
 
+### Rename only - the description is left exactly as it was
+PATCH {{api}}/tasks/1
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "title": "Buy oat milk"
+}
+
+### Clear the description - an empty title would be rejected instead
+PATCH {{api}}/tasks/1
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "description": ""
+}
+
+### Set the status outright - repeating this changes nothing the second time
+PATCH {{api}}/tasks/1
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "status": "completed"
+}
+
 ### Cycle status: created -> in_progress -> completed -> created
+### Relative, so a retry after a lost response moves the task again.
 POST {{api}}/tasks/1/toggle-status
 Authorization: Bearer {{token}}
 
