@@ -103,12 +103,12 @@ func TestConcurrent_ProfileUpdatesThroughUseCase(t *testing.T) {
 	go func() {
 		defer done.Done()
 		start.Wait()
-		_, errs[0] = uc.Update(ctx, domain.Claims{UserID: user.ID}, user.ID, "", "changed@example.com", "")
+		_, errs[0] = uc.Update(ctx, domain.Claims{UserID: user.ID}, user.ID, domain.UserEdit{Email: strPtr("changed@example.com")})
 	}()
 	go func() {
 		defer done.Done()
 		start.Wait()
-		_, errs[1] = uc.Update(ctx, domain.Claims{UserID: user.ID}, user.ID, "", "", "brand-new-password")
+		_, errs[1] = uc.Update(ctx, domain.Claims{UserID: user.ID}, user.ID, domain.UserEdit{Password: strPtr("brand-new-password")})
 	}()
 	start.Done()
 	done.Wait()

@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -194,5 +195,77 @@ func TestErrorHandler_MessageDropsTheSentinelPrefix(t *testing.T) {
 	}
 	if body.Message != "title must not be empty" {
 		t.Errorf("message = %q, want it without the sentinel prefix", body.Message)
+	}
+}
+
+func TestErrorHandler_ATimeoutIsRetryableRatherThanInternal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"the deadline on a database call expired", context.DeadlineExceeded},
+		{"the work was abandoned during shutdown", context.Canceled},
+		{
+			name: "wrapped, the way a repository reports it",
+			err:  fmt.Errorf("postgres: query tasks: %w", context.DeadlineExceeded),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := appWithHandlerError(tc.err)
+			resp, err := app.Test(httptest.NewRequest(fiber.MethodGet, "/x", nil))
+			if err != nil {
+				t.Fatalf("app.Test() unexpected error: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != fiber.StatusServiceUnavailable {
+				t.Errorf("status = %d, want %d", resp.StatusCode, fiber.StatusServiceUnavailable)
+			}
+			if retry := resp.Header.Get(fiber.HeaderRetryAfter); retry == "" {
+				t.Error("a 503 without Retry-After leaves a client to guess when to come back")
+			}
+
+			raw, _ := io.ReadAll(resp.Body)
+			var body struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(raw, &body); err != nil {
+				t.Fatalf("body is not JSON: %v (%s)", err, raw)
+			}
+			if body.Code != CodeUnavailable {
+				t.Errorf("code = %q, want %q", body.Code, CodeUnavailable)
+			}
+			if strings.Contains(body.Message, "postgres") {
+				t.Errorf("the message names the dependency: %q", body.Message)
+			}
+		})
+	}
+}
+
+// A timeout is logged, but not as a crash: a slow dependency and a panic at
+// the same level make both easy to stop reading.
+func TestErrorHandler_LogsATimeoutAsAWarning(t *testing.T) {
+	var recorded strings.Builder
+	logged := slog.New(slog.NewTextHandler(&recorded, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	app := fiber.New(fiber.Config{ErrorHandler: NewErrorHandler(logged)})
+	app.Get("/x", func(c *fiber.Ctx) error {
+		return fmt.Errorf("postgres: query tasks: %w", context.DeadlineExceeded)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(fiber.MethodGet, "/x", nil))
+	if err != nil {
+		t.Fatalf("app.Test() unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	line := recorded.String()
+	if !strings.Contains(line, "level=WARN") {
+		t.Errorf("the timeout was not logged as a warning: %s", line)
+	}
+	// The operator does get the detail the client is not given.
+	if !strings.Contains(line, "postgres: query tasks") {
+		t.Errorf("the log does not say what timed out: %s", line)
 	}
 }

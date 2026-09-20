@@ -243,7 +243,7 @@ func TestPasswordChange_EndsExistingSessions(t *testing.T) {
 	ctx := context.Background()
 	tokens := f.login(t)
 
-	if _, err := f.userUC.Update(ctx, domain.Claims{UserID: f.user.ID}, f.user.ID, "", "", "brand-new-password"); err != nil {
+	if _, err := f.userUC.Update(ctx, domain.Claims{UserID: f.user.ID}, f.user.ID, domain.UserEdit{Password: strPtr("brand-new-password")}); err != nil {
 		t.Fatalf("change password: %v", err)
 	}
 
@@ -290,7 +290,7 @@ func TestPasswordChangeCrossingRotation_NoSessionOutlivesTheChange(t *testing.T)
 		defer done.Done()
 		bothInPosition.Done()
 		bothInPosition.Wait()
-		_, changeErr = f.userUC.Update(context.Background(), domain.Claims{UserID: f.user.ID}, f.user.ID, "", "", "brand-new-password")
+		_, changeErr = f.userUC.Update(context.Background(), domain.Claims{UserID: f.user.ID}, f.user.ID, domain.UserEdit{Password: strPtr("brand-new-password")})
 	}()
 	done.Wait()
 
@@ -376,7 +376,7 @@ func TestPasswordChange_WaitsForWhoeverHoldsTheUserRow(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := f.userUC.Update(context.Background(), domain.Claims{UserID: f.user.ID}, f.user.ID, "", "", "brand-new-password")
+		_, err := f.userUC.Update(context.Background(), domain.Claims{UserID: f.user.ID}, f.user.ID, domain.UserEdit{Password: strPtr("brand-new-password")})
 		result <- err
 	}()
 
@@ -417,7 +417,7 @@ func TestPasswordChange_FailedUpdateKeepsSessions(t *testing.T) {
 		t.Fatal("the fixture should start with one active session")
 	}
 
-	_, err = f.userUC.Update(ctx, domain.Claims{UserID: f.user.ID}, f.user.ID, "bob", "", "brand-new-password")
+	_, err = f.userUC.Update(ctx, domain.Claims{UserID: f.user.ID}, f.user.ID, domain.UserEdit{Username: strPtr("bob"), Password: strPtr("brand-new-password")})
 	if !errors.Is(err, apperr.ErrConflict) {
 		t.Fatalf("Update() error = %v, want apperr.ErrConflict", err)
 	}
@@ -474,7 +474,7 @@ func TestLogin_CannotStoreASessionForAPasswordThatHasBeenReplaced(t *testing.T) 
 	// The login has verified the old password and is about to store its
 	// session. Change the password underneath it.
 	<-verified
-	if _, err := f.userUC.Update(ctx, domain.Claims{UserID: f.user.ID}, f.user.ID, "", "", "a-brand-new-password"); err != nil {
+	if _, err := f.userUC.Update(ctx, domain.Claims{UserID: f.user.ID}, f.user.ID, domain.UserEdit{Password: strPtr("a-brand-new-password")}); err != nil {
 		t.Fatalf("change password: %v", err)
 	}
 	close(changed)
@@ -507,7 +507,7 @@ func TestLogin_AfterAPasswordChangeOpensAFreshSession(t *testing.T) {
 
 	f.login(t)
 
-	if _, err := f.userUC.Update(ctx, domain.Claims{UserID: f.user.ID}, f.user.ID, "", "", "a-brand-new-password"); err != nil {
+	if _, err := f.userUC.Update(ctx, domain.Claims{UserID: f.user.ID}, f.user.ID, domain.UserEdit{Password: strPtr("a-brand-new-password")}); err != nil {
 		t.Fatalf("change password: %v", err)
 	}
 	if active := f.activeSessions(t); active != 0 {

@@ -241,6 +241,9 @@ func TestHasher_ReleasesSlotsAfterEveryCall(t *testing.T) {
 	}
 }
 
+// A wrong password and a hash bcrypt cannot read are different events: one
+// is a user typing badly, the other is a corrupted row or a mis-set
+// ADMIN_PASSWORD_HASH. Only the first may become a 401.
 func TestHasher_Verify_SeparatesAWrongPasswordFromABrokenHash(t *testing.T) {
 	h := testHasher(t)
 

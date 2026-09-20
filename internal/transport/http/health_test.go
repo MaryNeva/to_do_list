@@ -170,6 +170,8 @@ func TestReadyHandler_StopsAProbeThatOverrunsItsBudget(t *testing.T) {
 	}
 }
 
+// A probe's error names the host, port, database and user it could not
+// reach. /readyz needs no credentials, so that belongs in the log only.
 func TestReadyHandler_KeepsTheReasonOutOfTheResponse(t *testing.T) {
 	leak := "failed to connect to `user=todo_user database=to_do_prod`: " +
 		"db.internal.example:5432: connection refused"

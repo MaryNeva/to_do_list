@@ -8,9 +8,13 @@ import (
 )
 
 type UpdateUserRequest struct {
-	Username string `json:"username"`
-	Email    string `json:"email" validate:"omitempty,email"`
-	Password string `json:"password"`
+	Username *string `json:"username"`
+	Email    *string `json:"email" validate:"omitempty,email"`
+	Password *string `json:"password"`
+}
+
+func (r UpdateUserRequest) ToDomain() domain.UserEdit {
+	return domain.UserEdit{Username: r.Username, Email: r.Email, Password: r.Password}
 }
 
 type UserResponse struct {

@@ -5,13 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http/httptest"
+	"net/mail"
+	"net/url"
 	"os"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v2"
 	"gopkg.in/yaml.v3"
@@ -184,17 +189,29 @@ func (s *openAPI) validate(t *testing.T, where string, schema map[string]any, va
 	resolved := s.resolve(t, schema)
 	props, required, kind := s.flatten(t, resolved)
 
+	// null is a value like any other, and the document has to allow it. A
+	// checker that skips nil here cannot tell a property the document marks
+	// nullable from one the service forgot to fill in.
+	if value == nil {
+		if nullable, _ := resolved["nullable"].(bool); nullable {
+			return nil
+		}
+		return []string{fmt.Sprintf("%s: the service sent null, which the document does not allow", where)}
+	}
+
 	switch {
 	case kind == "array" || resolved["items"] != nil:
 		items, ok := value.([]any)
 		if !ok {
 			return []string{fmt.Sprintf("%s: the document says array, the service sent %T", where, value)}
 		}
+
+		problems := boundsOnCount(where, "items", len(items), resolved["minItems"], resolved["maxItems"])
+
 		itemSchema, _ := resolved["items"].(map[string]any)
 		if itemSchema == nil {
-			return nil
+			return problems
 		}
-		var problems []string
 		for i, item := range items {
 			problems = append(problems, s.validate(t, fmt.Sprintf("%s[%d]", where, i), itemSchema, item)...)
 		}
@@ -206,7 +223,7 @@ func (s *openAPI) validate(t *testing.T, where string, schema map[string]any, va
 			return []string{fmt.Sprintf("%s: the document says object, the service sent %T", where, value)}
 		}
 
-		var problems []string
+		problems := boundsOnCount(where, "properties", len(object), resolved["minProperties"], resolved["maxProperties"])
 
 		for _, name := range required {
 			if _, present := object[name]; !present {
@@ -241,34 +258,132 @@ func (s *openAPI) validate(t *testing.T, where string, schema map[string]any, va
 
 func (s *openAPI) validateScalar(where string, schema map[string]any, value any) []string {
 	kind, _ := schema["type"].(string)
-	if kind == "" || value == nil {
+	if kind == "" {
 		return nil
 	}
 
-	ok := true
 	switch kind {
 	case "string":
-		_, ok = value.(string)
-	case "integer", "number":
-		_, ok = value.(float64)
-	case "boolean":
-		_, ok = value.(bool)
-	}
-	if !ok {
-		return []string{fmt.Sprintf("%s: the document says %s, the service sent %T", where, kind, value)}
-	}
-
-	if allowed := toStrings(schema["enum"]); len(allowed) > 0 {
-		got, _ := value.(string)
-		for _, candidate := range allowed {
-			if candidate == got {
-				return nil
-			}
+		text, ok := value.(string)
+		if !ok {
+			return []string{fmt.Sprintf("%s: the document says string, the service sent %T", where, value)}
 		}
-		return []string{fmt.Sprintf("%s: %q is not one of the documented values %v", where, got, allowed)}
+		return validateString(where, schema, text)
+
+	case "integer", "number":
+		number, ok := value.(float64)
+		if !ok {
+			return []string{fmt.Sprintf("%s: the document says %s, the service sent %T", where, kind, value)}
+		}
+		// JSON has one numeric type; the document has two. A client that
+		// reads an id into an int is why the difference matters.
+		if kind == "integer" && number != math.Trunc(number) {
+			return []string{fmt.Sprintf("%s: the document says integer, the service sent %v", where, number)}
+		}
+		return validateNumber(where, schema, number)
+
+	case "boolean":
+		if _, ok := value.(bool); !ok {
+			return []string{fmt.Sprintf("%s: the document says boolean, the service sent %T", where, value)}
+		}
 	}
 
 	return nil
+}
+
+func validateString(where string, schema map[string]any, text string) []string {
+	if allowed := toStrings(schema["enum"]); len(allowed) > 0 && !slices.Contains(allowed, text) {
+		return []string{fmt.Sprintf("%s: %q is not one of the documented values %v", where, text, allowed)}
+	}
+
+	problems := boundsOnCount(where, "characters", utf8.RuneCountInString(text),
+		schema["minLength"], schema["maxLength"])
+
+	if expression, ok := schema["pattern"].(string); ok {
+		matched, err := regexp.MatchString(expression, text)
+		switch {
+		case err != nil:
+			problems = append(problems, fmt.Sprintf("%s: the document's pattern %q does not compile: %v", where, expression, err))
+		case !matched:
+			problems = append(problems, fmt.Sprintf("%s: %q does not match the documented pattern %q", where, text, expression))
+		}
+	}
+
+	// A format the document declares is a promise to whoever parses the
+	// value. An unknown format is not an error - OpenAPI allows any string -
+	// so only the ones this document actually uses are judged.
+	switch format, _ := schema["format"].(string); format {
+	case "date-time":
+		if _, err := time.Parse(time.RFC3339, text); err != nil {
+			problems = append(problems, fmt.Sprintf("%s: the document says date-time, %q is not RFC 3339", where, text))
+		}
+	case "date":
+		if _, err := time.Parse(time.DateOnly, text); err != nil {
+			problems = append(problems, fmt.Sprintf("%s: the document says date, %q is not YYYY-MM-DD", where, text))
+		}
+	case "email":
+		if parsed, err := mail.ParseAddress(text); err != nil || parsed.Address != text {
+			problems = append(problems, fmt.Sprintf("%s: the document says email, %q is not a bare address", where, text))
+		}
+	case "uri":
+		if parsed, err := url.Parse(text); err != nil || !parsed.IsAbs() {
+			problems = append(problems, fmt.Sprintf("%s: the document says uri, %q is not an absolute URI", where, text))
+		}
+	}
+
+	return problems
+}
+
+func validateNumber(where string, schema map[string]any, number float64) []string {
+	var problems []string
+
+	// OpenAPI 3.0 spells the exclusive bounds as booleans beside minimum and
+	// maximum; 3.1 spells them as numbers of their own. Both are read, so
+	// the checker does not quietly ignore a bound written the other way.
+	if limit, ok := asFloat(schema["minimum"]); ok {
+		exclusive, _ := schema["exclusiveMinimum"].(bool)
+		if (exclusive && number <= limit) || (!exclusive && number < limit) {
+			problems = append(problems, fmt.Sprintf("%s: %v is below the documented minimum %v", where, number, limit))
+		}
+	}
+	if limit, ok := asFloat(schema["exclusiveMinimum"]); ok && number <= limit {
+		problems = append(problems, fmt.Sprintf("%s: %v is not above the documented exclusive minimum %v", where, number, limit))
+	}
+	if limit, ok := asFloat(schema["maximum"]); ok {
+		exclusive, _ := schema["exclusiveMaximum"].(bool)
+		if (exclusive && number >= limit) || (!exclusive && number > limit) {
+			problems = append(problems, fmt.Sprintf("%s: %v is above the documented maximum %v", where, number, limit))
+		}
+	}
+	if limit, ok := asFloat(schema["exclusiveMaximum"]); ok && number >= limit {
+		problems = append(problems, fmt.Sprintf("%s: %v is not below the documented exclusive maximum %v", where, number, limit))
+	}
+
+	return problems
+}
+
+// boundsOnCount covers every min/max pair that counts something: characters
+// in a string, items in an array, properties in an object.
+func boundsOnCount(where, unit string, count int, min, max any) []string {
+	var problems []string
+	if limit, ok := asFloat(min); ok && float64(count) < limit {
+		problems = append(problems, fmt.Sprintf("%s: %d %s, the document requires at least %v", where, count, unit, limit))
+	}
+	if limit, ok := asFloat(max); ok && float64(count) > limit {
+		problems = append(problems, fmt.Sprintf("%s: %d %s, the document allows at most %v", where, count, unit, limit))
+	}
+	return problems
+}
+
+// YAML numbers arrive as int or float64 depending on how they were written.
+func asFloat(value any) (float64, bool) {
+	switch n := value.(type) {
+	case int:
+		return float64(n), true
+	case float64:
+		return n, true
+	}
+	return 0, false
 }
 
 func sortedKeys(m map[string]any) []string {
@@ -355,7 +470,7 @@ func (contractUsers) Get(context.Context, domain.Claims, int64) (domain.User, er
 func (contractUsers) List(context.Context, domain.Claims, domain.PageRequest) (domain.Page[domain.User], error) {
 	return domain.NewPage([]domain.User{sampleUser()}, 1, domain.PageRequest{Limit: 20, Offset: 0}), nil
 }
-func (contractUsers) Update(context.Context, domain.Claims, int64, string, string, string) (domain.User, error) {
+func (contractUsers) Update(context.Context, domain.Claims, int64, domain.UserEdit) (domain.User, error) {
 	return sampleUser(), nil
 }
 func (contractUsers) Delete(context.Context, domain.Claims, int64) error { return nil }
@@ -630,6 +745,129 @@ func TestOpenAPI_ListEndpointsReturnThePageEnvelope(t *testing.T) {
 			}
 			if len(*envelope.Items) != 1 || *envelope.Total != 1 || *envelope.Limit != 20 {
 				t.Errorf("envelope = %s, want one item with total 1 and limit 20", raw)
+			}
+		})
+	}
+}
+
+func TestOpenAPIChecker_CatchesWhatItClaimsTo(t *testing.T) {
+	spec := &openAPI{}
+
+	for _, tc := range []struct {
+		name   string
+		schema map[string]any
+		value  any
+		want   string // a fragment the complaint must contain; "" means accept
+	}{
+		{
+			name:   "a whole number where the document says integer",
+			schema: map[string]any{"type": "integer"},
+			value:  float64(7),
+		},
+		{
+			name:   "a fraction where the document says integer",
+			schema: map[string]any{"type": "integer"},
+			value:  7.5,
+			want:   "the document says integer",
+		},
+		{
+			name:   "a fraction where the document says number",
+			schema: map[string]any{"type": "number"},
+			value:  7.5,
+		},
+		{
+			name:   "null where the document does not allow it",
+			schema: map[string]any{"type": "string"},
+			value:  nil,
+			want:   "the service sent null",
+		},
+		{
+			name:   "null where the document allows it",
+			schema: map[string]any{"type": "string", "nullable": true},
+			value:  nil,
+		},
+		{
+			name:   "a timestamp that is not RFC 3339",
+			schema: map[string]any{"type": "string", "format": "date-time"},
+			value:  "2026-09-20 11:00:00",
+			want:   "is not RFC 3339",
+		},
+		{
+			name:   "a timestamp that is",
+			schema: map[string]any{"type": "string", "format": "date-time"},
+			value:  "2026-09-20T11:00:00Z",
+		},
+		{
+			name:   "an address with a display name is not an email",
+			schema: map[string]any{"type": "string", "format": "email"},
+			value:  "Mary <mary@example.com>",
+			want:   "is not a bare address",
+		},
+		{
+			name:   "a string longer than the document allows",
+			schema: map[string]any{"type": "string", "maxLength": 3},
+			value:  "abcd",
+			want:   "the document allows at most 3",
+		},
+		{
+			name:   "length is counted in characters, not bytes",
+			schema: map[string]any{"type": "string", "maxLength": 3},
+			value:  "ЙЦУ",
+		},
+		{
+			name:   "a number below the documented minimum",
+			schema: map[string]any{"type": "integer", "minimum": 1},
+			value:  float64(0),
+			want:   "below the documented minimum",
+		},
+		{
+			name:   "a number at an exclusive minimum written the 3.1 way",
+			schema: map[string]any{"type": "integer", "exclusiveMinimum": 0},
+			value:  float64(0),
+			want:   "not above the documented exclusive minimum",
+		},
+		{
+			name:   "a string that does not match the documented pattern",
+			schema: map[string]any{"type": "string", "pattern": "^v[0-9]+$"},
+			value:  "version-2",
+			want:   "does not match the documented pattern",
+		},
+		{
+			name:   "fewer items than the document requires",
+			schema: map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1},
+			value:  []any{},
+			want:   "the document requires at least 1",
+		},
+		{
+			name:   "a value outside the documented enum",
+			schema: map[string]any{"type": "string", "enum": []any{"created", "completed"}},
+			value:  "archived",
+			want:   "is not one of the documented values",
+		},
+		{
+			name: "a property the document does not describe",
+			schema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"id": map[string]any{"type": "integer"}},
+			},
+			value: map[string]any{"id": float64(1), "password_hash": "leaked"},
+			want:  "which the document does not describe",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			problems := spec.validate(t, "value", tc.schema, tc.value)
+
+			if tc.want == "" {
+				if len(problems) > 0 {
+					t.Fatalf("the checker rejected a value the document allows: %v", problems)
+				}
+				return
+			}
+			if len(problems) == 0 {
+				t.Fatalf("the checker accepted %#v, which the document does not allow", tc.value)
+			}
+			if !strings.Contains(strings.Join(problems, "\n"), tc.want) {
+				t.Errorf("complaint %v does not mention %q", problems, tc.want)
 			}
 		})
 	}

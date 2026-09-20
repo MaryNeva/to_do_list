@@ -73,7 +73,7 @@ func (stubUsers) Get(context.Context, domain.Claims, int64) (domain.User, error)
 func (stubUsers) List(context.Context, domain.Claims, domain.PageRequest) (domain.Page[domain.User], error) {
 	return domain.Page[domain.User]{}, nil
 }
-func (stubUsers) Update(context.Context, domain.Claims, int64, string, string, string) (domain.User, error) {
+func (stubUsers) Update(context.Context, domain.Claims, int64, domain.UserEdit) (domain.User, error) {
 	return domain.User{}, apperr.ErrNotFound
 }
 func (stubUsers) Delete(context.Context, domain.Claims, int64) error { return apperr.ErrNotFound }
@@ -278,6 +278,9 @@ func (acceptingAuth) ValidateToken(context.Context, string) (domain.Claims, erro
 	return domain.Claims{UserID: 7}, nil
 }
 
+// The rate limiter answers on its own, before any handler, and used to write
+// a bare "Too Many Requests" - the one response a client could not read the
+// way it reads every other failure.
 func TestApp_RateLimitedRequestCarriesTheErrorEnvelope(t *testing.T) {
 	app := New(
 		context.Background(),
@@ -432,6 +435,10 @@ func TestApp_AcceptsABodyUnderTheLimit(t *testing.T) {
 	}
 }
 
+// The rate limiter buckets by client address. Behind a reverse proxy the
+// connection is always the proxy's, so the address has to come from a
+// forwarding header - but only from a proxy the operator named, otherwise
+// any caller could mint a fresh bucket per request.
 func TestApp_ForwardedAddressIsOnlyBelievedFromATrustedProxy(t *testing.T) {
 	for _, tc := range []struct {
 		name           string

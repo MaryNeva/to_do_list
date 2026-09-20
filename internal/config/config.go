@@ -87,7 +87,9 @@ type Config struct {
 	MetricsEnabled   bool
 	MetricsPath      string
 	MetricsNamespace string
-	MetricsAddress   string
+	// MetricsAddress moves /metrics to a listener of its own. Empty keeps it
+	// on the public one, which is a development convenience only.
+	MetricsAddress string
 }
 
 const (

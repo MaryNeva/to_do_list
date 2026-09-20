@@ -15,6 +15,14 @@ type Draining interface {
 	ShutdownWithContext(ctx context.Context) error
 }
 
+// Drain performs the shutdown in the order that makes it graceful: stop
+// accepting, wait for the work already in flight, and only then cancel what
+// is left. The request contexts must NOT come from the signal context - a
+// signal cancels that one immediately, and handlers would be interrupted by
+// the very signal that asked for a clean stop.
+//
+// Every server gets the same budget and they drain at the same time, so a
+// slow scrape cannot spend the time the API needed.
 func Drain(timeout time.Duration, cancelInFlight context.CancelFunc, servers ...Draining) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -43,11 +51,18 @@ func Drain(timeout time.Duration, cancelInFlight context.CancelFunc, servers ...
 	return errors.Join(problems...)
 }
 
+// MetricsServer serves the exporter on a listener of its own. The endpoint
+// has no authentication, so a deployment binds it somewhere only the scraper
+// can reach and publishes nothing but the API port.
 type MetricsServer struct {
 	srv *http.Server
 	ln  net.Listener
 }
 
+// NewMetricsServer opens the listener immediately. A port already in use has
+// to fail here, while the process can still refuse to start: reported later
+// from a goroutine it would leave a service that passes every health check
+// and exports nothing.
 func NewMetricsServer(addr, path string, exporter http.Handler) (*MetricsServer, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {

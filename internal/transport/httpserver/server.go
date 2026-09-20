@@ -43,8 +43,6 @@ type Observability struct {
 	Build    buildinfo.Info
 }
 
-// New builds the application. Every request context derives from base, which
-// must outlive the signal that starts a shutdown: see Drain.
 func New(
 	base context.Context,
 	cfg Config,

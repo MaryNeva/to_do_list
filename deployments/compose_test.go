@@ -1,3 +1,6 @@
+// Package deployments holds no code. These tests guard the compose stack,
+// because everything they check is the kind of thing that is quietly
+// loosened during a debugging session and then committed.
 package deployments
 
 import (
@@ -12,6 +15,7 @@ const (
 	composePath              = "../docker-compose.yml"
 	observabilityComposePath = "../docker-compose.observability.yml"
 	prometheusPath           = "prometheus/prometheus.yml"
+	dashboardPath            = "grafana/dashboards/to-do-list.json"
 )
 
 type compose struct {
@@ -158,5 +162,40 @@ func TestCompose_PrometheusHasNoRemoteControl(t *testing.T) {
 		if strings.Contains(flag, "enable-lifecycle") || strings.Contains(flag, "enable-admin-api") {
 			t.Errorf("prometheus is started with %q", flag)
 		}
+	}
+}
+
+func TestCompose_MonitoringSettingsMatchWhatPrometheusAndGrafanaExpect(t *testing.T) {
+	app, ok := loadCompose(t).Services["app"]
+	if !ok {
+		t.Fatal("the compose file has no app service")
+	}
+
+	path := app.Environment["METRICS_PATH"]
+	namespace := app.Environment["METRICS_NAMESPACE"]
+
+	for name, value := range map[string]string{"METRICS_PATH": path, "METRICS_NAMESPACE": namespace} {
+		if value == "" {
+			t.Fatalf("%s is not set in the compose file", name)
+		}
+		if strings.Contains(value, "${") {
+			t.Errorf("%s is %q: the host can change it, and the bundled monitoring would not follow", name, value)
+		}
+	}
+
+	scrape, err := os.ReadFile(prometheusPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", prometheusPath, err)
+	}
+	if !strings.Contains(string(scrape), "metrics_path: "+path) {
+		t.Errorf("%s does not scrape %q", prometheusPath, path)
+	}
+
+	dashboard, err := os.ReadFile(dashboardPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", dashboardPath, err)
+	}
+	if !strings.Contains(string(dashboard), namespace+"_") {
+		t.Errorf("%s queries no series prefixed %q", dashboardPath, namespace+"_")
 	}
 }

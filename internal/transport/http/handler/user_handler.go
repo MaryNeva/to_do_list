@@ -92,7 +92,7 @@ func (h *UserHandler) Update(c *fiber.Ctx) error {
 		return err
 	}
 
-	user, err := h.users.Update(c.UserContext(), claims, id, req.Username, req.Email, req.Password)
+	user, err := h.users.Update(c.UserContext(), claims, id, req.ToDomain())
 	if err != nil {
 		return err
 	}

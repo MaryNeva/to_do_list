@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,8 +26,14 @@ const (
 	CodeMethodNotAllowed   = "method_not_allowed"
 	CodePayloadTooLarge    = "payload_too_large"
 	CodeRateLimited        = "rate_limited"
+	CodeUnavailable        = "unavailable"
 	CodeInternal           = "internal_error"
 )
+
+// retryAfterUnavailable is sent with every 503. One second is not a promise
+// that the dependency will be back by then; it is a floor, so that a client
+// retrying in a loop does not add its own load to whatever is already slow.
+const retryAfterUnavailable = "1"
 
 func StatusFor(err error) int {
 	if err == nil {
@@ -54,6 +61,9 @@ func StatusFor(err error) int {
 		return fiber.StatusUnauthorized
 	case errors.Is(err, apperr.ErrForbidden):
 		return fiber.StatusForbidden
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return fiber.StatusServiceUnavailable
+
 	default:
 		return fiber.StatusInternalServerError
 	}
@@ -75,6 +85,8 @@ func CodeFor(err error) string {
 		return CodeUnauthorized
 	case errors.Is(err, apperr.ErrForbidden):
 		return CodeForbidden
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return CodeUnavailable
 	}
 
 	var validationErrs validator.ValidationErrors
@@ -99,6 +111,8 @@ func CodeFor(err error) string {
 		return CodePayloadTooLarge
 	case status == fiber.StatusTooManyRequests:
 		return CodeRateLimited
+	case status == fiber.StatusServiceUnavailable:
+		return CodeUnavailable
 	case status >= 400 && status < 500:
 		return CodeBadRequest
 	default:
@@ -116,7 +130,8 @@ func NewErrorHandler(logger *slog.Logger) fiber.ErrorHandler {
 			Fields:    fieldErrors(err),
 		}
 
-		if status == fiber.StatusInternalServerError {
+		switch status {
+		case fiber.StatusInternalServerError:
 			logger.LogAttrs(c.UserContext(), slog.LevelError, "unhandled request error",
 				slog.String("method", c.Method()),
 				slog.String("path", c.Path()),
@@ -124,6 +139,16 @@ func NewErrorHandler(logger *slog.Logger) fiber.ErrorHandler {
 			)
 			body.Message = "internal server error"
 			body.Fields = nil
+
+		case fiber.StatusServiceUnavailable:
+			logger.LogAttrs(c.UserContext(), slog.LevelWarn, "request did not complete in time",
+				slog.String("method", c.Method()),
+				slog.String("path", c.Path()),
+				slog.String("error", err.Error()),
+			)
+			body.Message = "the server could not complete the request in time; try again"
+			body.Fields = nil
+			c.Set(fiber.HeaderRetryAfter, retryAfterUnavailable)
 		}
 
 		return JSON(c, status, body)

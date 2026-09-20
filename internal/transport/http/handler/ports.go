@@ -9,7 +9,7 @@ import (
 type UserService interface {
 	Get(ctx context.Context, actor domain.Claims, id int64) (domain.User, error)
 	List(ctx context.Context, actor domain.Claims, page domain.PageRequest) (domain.Page[domain.User], error)
-	Update(ctx context.Context, actor domain.Claims, id int64, username, email, newPassword string) (domain.User, error)
+	Update(ctx context.Context, actor domain.Claims, id int64, edit domain.UserEdit) (domain.User, error)
 	Delete(ctx context.Context, actor domain.Claims, id int64) error
 }
 type AuthService interface {

@@ -20,15 +20,32 @@ func RequestContext(base context.Context) fiber.Handler {
 		ctx, cancel := context.WithCancel(base)
 		defer cancel()
 
-		if id := requestID(c); id != "" {
-			c.Locals(logger.RequestIDKey, id)
-			ctx = logger.WithRequestID(ctx, id)
+		var request context.Context = ctx
+		if previous := c.UserContext(); previous != nil && previous != context.Background() {
+			request = inherited{Context: ctx, values: previous}
 		}
 
-		c.SetUserContext(ctx)
+		if id := requestID(c); id != "" {
+			c.Locals(logger.RequestIDKey, id)
+			request = logger.WithRequestID(request, id)
+		}
+
+		c.SetUserContext(request)
 
 		return c.Next()
 	}
+}
+
+type inherited struct {
+	context.Context
+	values context.Context
+}
+
+func (i inherited) Value(key any) any {
+	if v := i.Context.Value(key); v != nil {
+		return v
+	}
+	return i.values.Value(key)
 }
 
 func requestID(c *fiber.Ctx) string {

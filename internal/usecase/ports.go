@@ -35,11 +35,24 @@ type SessionStore interface {
 	Create(context.Context, domain.RefreshToken, int64) (domain.RefreshToken, error)
 
 	// Rotate consumes the presented token and stores the replacement in one
-	// transaction, so a token is spent at most once. apperr.ErrConflict means
-	// it was already consumed (replay), ErrNotFound that it is unknown,
-	// ErrUnauthorized that it has lapsed. On any error nothing is written and
-	// the presented token stays usable. Expiry is judged by the database
-	// clock after the lock is held, not by the caller's.
+	// transaction, so a token is spent at most once. Expiry is judged by the
+	// database clock after the lock is held, not by the caller's.
+	//
+	// The errors say what happened and what was written:
+	//
+	//   ErrTokenReuse  - the token had already been consumed. Every session
+	//                    of that user was revoked in the same transaction
+	//                    that detected the replay, and the count is in
+	//                    RotateResult.SessionsRevoked. This is the one error
+	//                    that does write.
+	//   ErrNotFound    - the token is unknown; nothing was written.
+	//   ErrUnauthorized - the token has lapsed; nothing was written.
+	//   ErrConflict    - the replacement collided with a token already
+	//                    stored, which is a generator failure rather than
+	//                    anything the presenter did; nothing was written and
+	//                    no session is revoked.
+	//
+	// After anything but ErrTokenReuse the presented token stays usable.
 	Rotate(context.Context, string, domain.RefreshToken) (domain.RotateResult, error)
 
 	// Revoke reports apperr.ErrNotFound unless it ended exactly one session.

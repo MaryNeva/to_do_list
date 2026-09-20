@@ -267,7 +267,7 @@ func TestUserUseCase_RecordsSessionRevocationOnPasswordChangeOnly(t *testing.T) 
 	}
 
 	sessionsToRevoke = 5
-	if _, err := uc.Update(ctx, domain.Claims{IsAdmin: true}, created.ID, "", "new@example.com", ""); err != nil {
+	if _, err := uc.Update(ctx, domain.Claims{IsAdmin: true}, created.ID, domain.UserEdit{Email: ptr("new@example.com")}); err != nil {
 		t.Fatalf("Update(email) unexpected error: %v", err)
 	}
 	if got := metrics.count(metrics.revocationCalls, ReasonPasswordChange); got != 0 {
@@ -275,7 +275,7 @@ func TestUserUseCase_RecordsSessionRevocationOnPasswordChangeOnly(t *testing.T) 
 	}
 
 	sessionsToRevoke = 0
-	if _, err := uc.Update(ctx, domain.Claims{IsAdmin: true}, created.ID, "", "", "first-new-password"); err != nil {
+	if _, err := uc.Update(ctx, domain.Claims{IsAdmin: true}, created.ID, domain.UserEdit{Password: ptr("first-new-password")}); err != nil {
 		t.Fatalf("Update(password) unexpected error: %v", err)
 	}
 	if got := metrics.count(metrics.revoked, ReasonPasswordChange); got != 0 {
@@ -283,7 +283,7 @@ func TestUserUseCase_RecordsSessionRevocationOnPasswordChangeOnly(t *testing.T) 
 	}
 
 	sessionsToRevoke = 1
-	if _, err := uc.Update(ctx, domain.Claims{IsAdmin: true}, created.ID, "", "", "second-new-password"); err != nil {
+	if _, err := uc.Update(ctx, domain.Claims{IsAdmin: true}, created.ID, domain.UserEdit{Password: ptr("second-new-password")}); err != nil {
 		t.Fatalf("Update(password) unexpected error: %v", err)
 	}
 	if got := metrics.count(metrics.revoked, ReasonPasswordChange); got != 1 {
@@ -291,7 +291,7 @@ func TestUserUseCase_RecordsSessionRevocationOnPasswordChangeOnly(t *testing.T) 
 	}
 
 	sessionsToRevoke = 3
-	if _, err := uc.Update(ctx, domain.Claims{IsAdmin: true}, created.ID, "", "", "third-new-password"); err != nil {
+	if _, err := uc.Update(ctx, domain.Claims{IsAdmin: true}, created.ID, domain.UserEdit{Password: ptr("third-new-password")}); err != nil {
 		t.Fatalf("Update(password) unexpected error: %v", err)
 	}
 	if got := metrics.count(metrics.revoked, ReasonPasswordChange); got != 4 {
@@ -313,7 +313,7 @@ func TestUserUseCase_FailedPasswordChangeRecordsNoRevocation(t *testing.T) {
 		MaxPageSize:       100,
 	}, silentLogger(), WithMetrics(metrics))
 
-	if _, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, 404, "", "", "brand-new-password"); err == nil {
+	if _, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, 404, domain.UserEdit{Password: ptr("brand-new-password")}); err == nil {
 		t.Fatal("updating a user that does not exist should fail")
 	}
 

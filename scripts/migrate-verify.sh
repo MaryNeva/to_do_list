@@ -26,7 +26,17 @@ cd "$ROOT_DIR"
 
 MIGRATE_VERSION="${MIGRATE_VERSION:-v4.19.1}"
 MIGRATIONS_DIR="${MIGRATIONS_DIR:-migrations}"
-VERIFY_DB="${VERIFY_DB:-to_do_migrate_verify_$$}"
+# A name this run owns. $$ alone repeats - after a reboot, or across
+# containers - and everything below is written on the assumption that this
+# database belongs to nobody else.
+VERIFY_DB="${VERIFY_DB:-to_do_migrate_verify_$$_$(date +%s)}"
+
+# The name is interpolated into SQL as an identifier, so it is validated
+# rather than escaped: anything that is not a plain identifier is refused.
+if ! [[ "$VERIFY_DB" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]]; then
+	echo "VERIFY_DB=${VERIFY_DB} is not a plain SQL identifier" >&2
+	exit 2
+fi
 
 # MIGRATE_BIN lets a caller supply an already-built CLI (CI, or an offline
 # machine); otherwise the pinned version is fetched and run on the spot. The
@@ -52,7 +62,11 @@ print(urlunparse(u._replace(path="/postgres")))
 PY
 )}"
 
-VERIFY_URL="$(python3 - "$BASE_URL" "$VERIFY_DB" <<'PY'
+# Built from ADMIN_URL, not from the service's own DSN: the database is
+# created on the admin connection's server, so that is where it has to be
+# migrated. Deriving it from BASE_URL would create it on one server and
+# verify migrations on another whenever the two differ.
+VERIFY_URL="$(python3 - "$ADMIN_URL" "$VERIFY_DB" <<'PY'
 import sys
 from urllib.parse import urlparse, urlunparse
 u = urlparse(sys.argv[1])
@@ -63,7 +77,13 @@ PY
 psql_admin() { psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -tA "$@"; }
 psql_verify() { psql "$VERIFY_URL" -v ON_ERROR_STOP=1 -tA "$@"; }
 
+# Armed before the database exists, so that a failure anywhere after the
+# CREATE still tidies up - which means it also has to know when there is
+# nothing of its own to tidy. Without this flag, pointing VERIFY_DB at a
+# database that already exists and failing to create it drops that database.
+CREATED=0
 cleanup() {
+	[[ "$CREATED" == "1" ]] || return 0
 	psql_admin -c "DROP DATABASE IF EXISTS \"${VERIFY_DB}\";" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -93,7 +113,12 @@ schema_fingerprint() {
 }
 
 step "Creating the throwaway database ${VERIFY_DB}"
+if [[ "$(psql_admin -c "SELECT count(*) FROM pg_database WHERE datname = '${VERIFY_DB}';")" != "0" ]]; then
+	echo "  FAIL - database ${VERIFY_DB} already exists; this script drops the database it creates, and will not touch one it did not" >&2
+	exit 2
+fi
 psql_admin -c "CREATE DATABASE \"${VERIFY_DB}\";" >/dev/null
+CREATED=1
 pass "created"
 
 step "Applying every migration (up)"

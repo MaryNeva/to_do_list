@@ -21,7 +21,7 @@ import (
 type fakeUserService struct {
 	getFn    func(ctx context.Context, actor domain.Claims, id int64) (domain.User, error)
 	listFn   func(ctx context.Context, actor domain.Claims, page domain.PageRequest) (domain.Page[domain.User], error)
-	updateFn func(ctx context.Context, actor domain.Claims, id int64, username, email, newPassword string) (domain.User, error)
+	updateFn func(ctx context.Context, actor domain.Claims, id int64, edit domain.UserEdit) (domain.User, error)
 	deleteFn func(ctx context.Context, actor domain.Claims, id int64) error
 }
 
@@ -31,8 +31,8 @@ func (f fakeUserService) Get(ctx context.Context, actor domain.Claims, id int64)
 func (f fakeUserService) List(ctx context.Context, actor domain.Claims, page domain.PageRequest) (domain.Page[domain.User], error) {
 	return f.listFn(ctx, actor, page)
 }
-func (f fakeUserService) Update(ctx context.Context, actor domain.Claims, id int64, username, email, newPassword string) (domain.User, error) {
-	return f.updateFn(ctx, actor, id, username, email, newPassword)
+func (f fakeUserService) Update(ctx context.Context, actor domain.Claims, id int64, edit domain.UserEdit) (domain.User, error) {
+	return f.updateFn(ctx, actor, id, edit)
 }
 func (f fakeUserService) Delete(ctx context.Context, actor domain.Claims, id int64) error {
 	return f.deleteFn(ctx, actor, id)
@@ -175,13 +175,13 @@ func TestUserHandler_List_AdminOnly(t *testing.T) {
 
 func TestUserHandler_Update_NotFound(t *testing.T) {
 	svc := fakeUserService{
-		updateFn: func(context.Context, domain.Claims, int64, string, string, string) (domain.User, error) {
+		updateFn: func(context.Context, domain.Claims, int64, domain.UserEdit) (domain.User, error) {
 			return domain.User{}, apperr.ErrNotFound
 		},
 	}
 	app := newUserTestApp(svc, domain.Claims{UserID: 1})
 
-	body, _ := json.Marshal(dto.UpdateUserRequest{Email: "new@example.com"})
+	body, _ := json.Marshal(dto.UpdateUserRequest{Email: strPtr("new@example.com")})
 	req := httptest.NewRequest(fiber.MethodPatch, "/users/1", bytes.NewReader(body))
 	req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
 	req.Header.Set(fiber.HeaderAuthorization, "Bearer token")
@@ -192,5 +192,151 @@ func TestUserHandler_Update_NotFound(t *testing.T) {
 	}
 	if resp.StatusCode != fiber.StatusNotFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusNotFound)
+	}
+}
+
+func TestUserHandler_Update_TellsAnAbsentFieldFromAnEmptyOne(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want domain.UserEdit
+	}{
+		{
+			name: "an empty object edits nothing",
+			body: `{}`,
+			want: domain.UserEdit{},
+		},
+		{
+			name: "null reads as absent",
+			body: `{"username":null,"email":null,"password":null}`,
+			want: domain.UserEdit{},
+		},
+		{
+			name: "one field sent, the others left alone",
+			body: `{"username":"bob"}`,
+			want: domain.UserEdit{Username: strPtr("bob")},
+		},
+		{
+			name: "an empty string is sent on as an empty string, not as silence",
+			body: `{"username":""}`,
+			want: domain.UserEdit{Username: strPtr("")},
+		},
+		{
+			name: "every field at once",
+			body: `{"username":"bob","email":"bob@example.com","password":"a-new-password"}`,
+			want: domain.UserEdit{
+				Username: strPtr("bob"),
+				Email:    strPtr("bob@example.com"),
+				Password: strPtr("a-new-password"),
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got domain.UserEdit
+			svc := fakeUserService{
+				updateFn: func(_ context.Context, _ domain.Claims, _ int64, edit domain.UserEdit) (domain.User, error) {
+					got = edit
+					return domain.User{ID: 1, Username: "bob", Email: "bob@example.com"}, nil
+				},
+			}
+			app := newUserTestApp(svc, domain.Claims{UserID: 1})
+
+			req := httptest.NewRequest(fiber.MethodPatch, "/users/1", strings.NewReader(tc.body))
+			req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+			req.Header.Set(fiber.HeaderAuthorization, "Bearer token")
+
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("app.Test() unexpected error: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != fiber.StatusOK {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusOK)
+			}
+
+			assertSameEdit(t, got, tc.want)
+		})
+	}
+}
+
+// An edit the use case refuses - nothing to change, or a field present and
+// empty - has to reach the caller as a 400, not as a 500.
+func TestUserHandler_Update_ReportsARefusedEditAsABadRequest(t *testing.T) {
+	svc := fakeUserService{
+		updateFn: func(context.Context, domain.Claims, int64, domain.UserEdit) (domain.User, error) {
+			return domain.User{}, apperr.ErrValidation
+		},
+	}
+	app := newUserTestApp(svc, domain.Claims{UserID: 1})
+
+	req := httptest.NewRequest(fiber.MethodPatch, "/users/1", strings.NewReader(`{}`))
+	req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	req.Header.Set(fiber.HeaderAuthorization, "Bearer token")
+
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test() unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusBadRequest)
+	}
+}
+
+func assertSameEdit(t *testing.T, got, want domain.UserEdit) {
+	t.Helper()
+
+	for _, field := range []struct {
+		name      string
+		got, want *string
+	}{
+		{"username", got.Username, want.Username},
+		{"email", got.Email, want.Email},
+		{"password", got.Password, want.Password},
+	} {
+		switch {
+		case field.got == nil && field.want == nil:
+		case field.got == nil:
+			t.Errorf("%s reached the service as absent, want %q", field.name, *field.want)
+		case field.want == nil:
+			t.Errorf("%s reached the service as %q, want absent", field.name, *field.got)
+		case *field.got != *field.want:
+			t.Errorf("%s reached the service as %q, want %q", field.name, *field.got, *field.want)
+		}
+	}
+}
+
+func TestUserHandler_Update_JudgesTheEmailOnlyWhenItWasSent(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{"not an address", `{"email":"nope"}`, fiber.StatusBadRequest},
+		{"present but empty", `{"email":""}`, fiber.StatusBadRequest},
+		{"absent", `{"username":"bob"}`, fiber.StatusOK},
+		{"null", `{"email":null,"username":"bob"}`, fiber.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := fakeUserService{
+				updateFn: func(context.Context, domain.Claims, int64, domain.UserEdit) (domain.User, error) {
+					return domain.User{ID: 1, Username: "bob"}, nil
+				},
+			}
+			app := newUserTestApp(svc, domain.Claims{UserID: 1})
+
+			req := httptest.NewRequest(fiber.MethodPatch, "/users/1", strings.NewReader(tc.body))
+			req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+			req.Header.Set(fiber.HeaderAuthorization, "Bearer token")
+
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("app.Test() unexpected error: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
+			}
+		})
 	}
 }

@@ -153,6 +153,8 @@ func (f *fakeRefreshRepo) RevokeAllForUser(_ context.Context, userID int64) (int
 	return f.revokeAllLocked(userID)
 }
 
+// revokeAllLocked is the same work without taking the lock, for callers that
+// already hold it - the fake's stand-in for "in the same transaction".
 func (f *fakeRefreshRepo) revokeAllLocked(userID int64) (int64, error) {
 	if f.revokeAllErr != nil {
 		return 0, f.revokeAllErr

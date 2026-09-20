@@ -62,9 +62,10 @@ the security and correctness choices behind the auth and ownership checks.
   code (404/409/400/401/403) and to a stable machine-readable `code`, and only
   that error's message ever reaches the client - anything unexpected is logged
   in full server-side and returned to the client as a bare `500`.
-- `PATCH /tasks/{id}` is a true partial update: an absent property keeps its
-  value, a present one is written, and the status can be set outright, so a
-  retried request does not move the task a second time.
+- `PATCH /tasks/{id}` and `PATCH /users/{id}` are true partial updates: an
+  absent property keeps its value, a present one is written, and a task's
+  status can be set outright, so a retried request does not move the task a
+  second time.
 - `context`-based timeouts on every database call, independent of whatever
   deadline the incoming request's context already carries.
 - Explicit resource ceilings: request-body size, connection-pool size and
@@ -132,7 +133,7 @@ cases and handlers with in-memory fakes instead of a real database (see the
 
 ## Quick start (Docker)
 
-Requires Docker Compose and Go 1.24+ (the development command wrapper loads
+Requires Docker Compose and Go 1.25+ (the development command wrapper loads
 `.env` with the same semantics as the server).
 
 ```bash
@@ -169,7 +170,7 @@ afterwards.
 
 ## Local development (without Docker)
 
-Requires Go 1.24+ and a Postgres instance.
+Requires Go 1.25+ and a Postgres instance.
 
 ```bash
 cp .env.example .env
@@ -237,6 +238,30 @@ clients editing different properties of the same task both keep their change.
 after a lost response moves the task again. Prefer `PATCH` with an explicit
 status wherever a request may be retried.
 
+### Editing a profile
+
+`PATCH /api/v1/users/{id}` follows the same rule, with one difference: no
+profile field can be cleared, so a property that is present but empty is a
+mistake to report rather than an absence to ignore.
+
+```bash
+# changes the email, leaves the username and password alone
+curl -X PATCH localhost:8080/api/v1/users/1 -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <token>' -d '{"email":"new@example.com"}'
+
+# 400: the username was sent, and "" is not a username
+curl -X PATCH localhost:8080/api/v1/users/1 -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <token>' -d '{"username":""}'
+
+# 400: nothing to change
+curl -X PATCH localhost:8080/api/v1/users/1 -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <token>' -d '{}'
+```
+
+`null` counts as absent here too. Surrounding whitespace is trimmed from the
+username and the email; a password is stored exactly as sent, spaces
+included. Changing the password revokes every refresh token that user holds.
+
 ### Error responses
 
 Every failure - including the rate limiter's `429` and an unknown route -
@@ -253,10 +278,21 @@ answers with the same envelope:
 
 `code` is the contract and is safe to branch on: `validation_error`,
 `bad_request`, `not_found`, `conflict`, `unauthorized`, `invalid_credentials`,
-`forbidden`, `method_not_allowed`, `rate_limited`, `internal_error`. `message`
-is written for people and may be reworded at any time. `fields` appears only
-when individual fields were rejected. `request_id` matches the
-`X-Request-ID` header and the server's log line for the same request.
+`forbidden`, `method_not_allowed`, `rate_limited`, `unavailable`,
+`internal_error`. `message` is written for people and may be reworded at any
+time. `fields` appears only when individual fields were rejected.
+`request_id` matches the `X-Request-ID` header and the server's log line for
+the same request.
+
+Two of those are worth telling apart. `internal_error` (`500`) means
+something went wrong that should not have, and the request is not worth
+retrying as it stands. `unavailable` (`503`, with `Retry-After`) means the
+request was fine but did not finish in time - a database call hit
+`db.call_timeout`, or the server was shutting down and abandoned the work -
+and retrying is the right response. Answering a timeout with `500` would
+tell a client to give up on a request that will very likely succeed, and
+would bury a slow dependency at the same log level as a crash; timeouts are
+logged as warnings, with the detail the client is not given.
 
 ## Configuration
 
@@ -364,8 +400,10 @@ So `POST /auth/logout` and a password change both take effect on the next
 refresh, not on the next API call: an access token already in a client's
 hands keeps working until it expires. That is the price of not querying the
 database on every request, and the reason `jwt.ttl` is kept short. A
-deployment that needs instant invalidation should lower `jwt.ttl` rather
-than assume logout cuts access off at once.
+deployment that needs revocation to bite sooner can lower `jwt.ttl`, which
+shortens the window rather than closing it; nothing short of checking the
+database on every request makes it immediate. What logout and a password
+change do guarantee is that no *new* access token can be minted.
 
 The access token is also verified strictly: only HS256 is accepted, the
 issuer must match `jwt.issuer`, an `exp` claim is required (a token without
@@ -490,7 +528,11 @@ their own - never the one `make run` uses. Create it once:
 
 ```bash
 make docker-up   # brings up Postgres (and the app)
-docker compose --env-file /dev/null exec -T db \
+
+# Through the project's .env loader: Compose interpolates the whole file for
+# every command it is given, so a bare "docker compose exec" stops at
+# DB_PASSWORD before it ever reaches psql.
+go run ./cmd/envexec docker compose --env-file /dev/null exec -T db \
   psql -U postgres -c 'CREATE DATABASE to_do_test'
 
 TEST_DATABASE_URL="postgres://postgres:<password>@localhost:5432/to_do_test?sslmode=disable" \
@@ -636,8 +678,12 @@ app).
 
 ### Prometheus and Grafana
 
-Both live in `docker-compose.yml` behind the `observability` profile, so a
-plain `docker compose up` still starts only Postgres and the API.
+Both live in a second compose file, `docker-compose.observability.yml`, which
+is overlaid on the base one. A profile would not do: Compose interpolates
+every variable in a file whatever profile is selected, so Grafana's mandatory
+`GRAFANA_PASSWORD` would become a requirement for starting the API on its
+own. With two files, `make docker-up` starts Postgres and the API and never
+reads it.
 
 ```bash
 # GRAFANA_PASSWORD must be set in .env first - there is no default.
@@ -803,6 +849,10 @@ the limitation is documented rather than engineered around.
   to the requests - the obvious wiring - cancels every in-flight query at the
   moment the log says it is draining them (`TestDrain_LetsAnInFlightRequestFinish`
   and `TestDrain_CancelsWorkThatOutlivesTheGracePeriod` pin both halves).
+  A listener that dies on its own takes the same path: the other server is
+  drained on the same budget and the pool is closed only afterwards, rather
+  than being closed under requests that are still running
+  (`TestAwaitStop_DrainsEvenWhenTheExitIsAFailure`).
 - Migrations (`golang-migrate`) run automatically on startup, toggleable
   with `RUN_MIGRATIONS`.
 - Observability points inward like everything else. `internal/usecase`
@@ -873,4 +923,4 @@ this same format; neither Make nor Bash sources `.env`. Compose is passed
 `--env-file /dev/null` so it consumes the resolved process environment instead
 of parsing `.env` again. Use the Make targets, or prefix a direct Compose call
 with `go run ./cmd/envexec docker compose --env-file /dev/null ...`.
-The smoke script therefore also requires Go 1.24+.
+The smoke script therefore also requires Go 1.25+.

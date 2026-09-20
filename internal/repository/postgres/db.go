@@ -12,6 +12,9 @@ import (
 
 const uniqueViolationCode = "23505"
 
+// PoolConfig bounds what the pool may hold. Without it pgx defaults to four
+// connections per core and keeps them forever, which is both unrelated to
+// what Postgres can serve and blind to a database that has since restarted.
 type PoolConfig struct {
 	MaxConns       int32
 	MinConns       int32
@@ -30,6 +33,8 @@ func NewPool(ctx context.Context, dsn string, poolCfg PoolConfig) (*pgxpool.Pool
 	cfg.MinConns = poolCfg.MinConns
 	cfg.MaxConnLifetime = poolCfg.MaxConnLife
 	cfg.MaxConnIdleTime = poolCfg.MaxConnIdle
+	// Dialling has its own budget: a connection the pool is still opening
+	// must not hold a request past the caller's timeout.
 	cfg.ConnConfig.ConnectTimeout = poolCfg.ConnectTimeout
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)

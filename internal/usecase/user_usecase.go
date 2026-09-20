@@ -64,16 +64,24 @@ func (uc *UserUseCase) List(ctx context.Context, actor domain.Claims, page domai
 	return users, nil
 }
 
-func (uc *UserUseCase) Update(ctx context.Context, actor domain.Claims, id int64, username, email, newPassword string) (domain.User, error) {
+func (uc *UserUseCase) Update(ctx context.Context, actor domain.Claims, id int64, edit domain.UserEdit) (domain.User, error) {
 	if err := authorizeUser(actor, id, false); err != nil {
 		return domain.User{}, err
 	}
+	if edit.IsEmpty() {
+		return domain.User{}, fmt.Errorf("%w: at least one of username, email, password must be present", apperr.ErrValidation)
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 
 	var fields domain.UserUpdate
 
-	if username = normalizeUsername(username); username != "" {
+	if edit.Username != nil {
+		username := normalizeUsername(*edit.Username)
+		if username == "" {
+			return domain.User{}, fmt.Errorf("%w: username must not be empty", apperr.ErrValidation)
+		}
 		if err := validateUsername(username, uc.cfg.MinUsernameLength, uc.cfg.MaxUsernameLength); err != nil {
 			return domain.User{}, err
 		}
@@ -82,13 +90,19 @@ func (uc *UserUseCase) Update(ctx context.Context, actor domain.Claims, id int64
 		}
 		fields.Username = &username
 	}
-	if email = strings.TrimSpace(email); email != "" {
+	if edit.Email != nil {
+		// validateEmail rejects "" with "email is required", which is the
+		// right answer here as well: the address cannot be removed.
+		email := strings.TrimSpace(*edit.Email)
 		if err := validateEmail(email); err != nil {
 			return domain.User{}, err
 		}
 		fields.Email = &email
 	}
-	if newPassword != "" {
+	if edit.Password != nil {
+		// Not trimmed: leading and trailing spaces are part of a password.
+		// An empty one fails the minimum-length check below.
+		newPassword := *edit.Password
 		if err := validatePassword(newPassword, uc.cfg.MinPasswordLength); err != nil {
 			return domain.User{}, err
 		}
@@ -166,8 +180,14 @@ func validateUsername(username string, min, max int) error {
 	}
 }
 
+// maxEmailLength is the practical ceiling from RFC 5321: 64 for the local
+// part, 255 for the domain, plus the @.
 const maxEmailLength = 320
 
+// validateEmail is the use case's own check, not the transport's. The DTO
+// tag rejects a malformed address before a handler runs, but a caller that
+// reaches Register or Update directly - another use case, a CLI, a test -
+// would otherwise store whatever it was given.
 func validateEmail(email string) error {
 	if email == "" {
 		return fmt.Errorf("%w: email is required", apperr.ErrValidation)
@@ -176,6 +196,9 @@ func validateEmail(email string) error {
 		return fmt.Errorf("%w: email must be at most %d characters", apperr.ErrValidation, maxEmailLength)
 	}
 
+	// net/mail accepts the forms RFC 5322 allows, including a display name,
+	// which an address field must not carry: "Mary <m@e.com>" is a valid
+	// address expression and an invalid email column.
 	parsed, err := mail.ParseAddress(email)
 	if err != nil || parsed.Address != email {
 		return fmt.Errorf("%w: %q is not a valid email address", apperr.ErrValidation, email)
@@ -185,6 +208,10 @@ func validateEmail(email string) error {
 
 func validatePassword(plain string, min int) error {
 	switch {
+	// Named separately so that a minimum of zero, however it came to be
+	// configured, still cannot admit a passwordless account.
+	case plain == "":
+		return fmt.Errorf("%w: password must not be empty", apperr.ErrValidation)
 	case utf8.RuneCountInString(plain) < min:
 		return fmt.Errorf("%w: password must be at least %d characters", apperr.ErrValidation, min)
 	case len(plain) > password.MaxLength:

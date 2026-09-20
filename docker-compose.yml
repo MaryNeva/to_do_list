@@ -84,8 +84,15 @@ services:
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-}
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-}
       METRICS_ENABLED: ${METRICS_ENABLED:-}
-      METRICS_PATH: ${METRICS_PATH:-}
-      METRICS_NAMESPACE: ${METRICS_NAMESPACE:-}
+
+      # Pinned, not overridable from .env: the Prometheus scrape config in
+      # deployments/prometheus/prometheus.yml asks for this path, and the
+      # Grafana dashboard queries series with this prefix. Letting the host
+      # change either would leave the bundled monitoring pointing at nothing,
+      # which is a worse outcome than not being able to rename them here.
+      # deployments/compose_test.go checks that these three stay in step.
+      METRICS_PATH: /metrics
+      METRICS_NAMESPACE: todo
 
       # /metrics gets a listener of its own, and this compose file publishes
       # no port for it: Prometheus reaches it across the internal network and

@@ -173,7 +173,7 @@ func TestUserUseCase_Update_DoesNotRehashUnchangedPassword(t *testing.T) {
 		t.Fatalf("seed Create() unexpected error: %v", err)
 	}
 
-	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, "", "alice@new-domain.com", "")
+	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, domain.UserEdit{Email: ptr("alice@new-domain.com")})
 	if err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestUserUseCase_Update_ChangesPasswordWhenProvided(t *testing.T) {
 	hash, _ := testHasher(t).Hash(context.Background(), "original-password")
 	created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
 
-	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, "", "", "new-password")
+	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, domain.UserEdit{Password: ptr("new-password")})
 	if err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestUserUseCase_Update_PartialFieldsLeaveOthersUnchanged(t *testing.T) {
 	uc, repo := newUserUseCaseForTest(t)
 	created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: "hash"})
 
-	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, "alice2", "", "")
+	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, domain.UserEdit{Username: ptr("alice2")})
 	if err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
@@ -234,18 +234,17 @@ func TestUserUseCase_Update_EnforcesConfiguredLengthPolicy(t *testing.T) {
 	created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: "hash"})
 
 	tests := []struct {
-		name        string
-		username    string
-		newPassword string
+		name string
+		edit domain.UserEdit
 	}{
-		{"username below the configured minimum", strings.Repeat("a", cfg.MinUsernameLength-1), ""},
-		{"username above the configured maximum", strings.Repeat("a", cfg.MaxUsernameLength+1), ""},
-		{"password below the configured minimum", "", strings.Repeat("p", cfg.MinPasswordLength-1)},
+		{"username below the configured minimum", domain.UserEdit{Username: ptr(strings.Repeat("a", cfg.MinUsernameLength-1))}},
+		{"username above the configured maximum", domain.UserEdit{Username: ptr(strings.Repeat("a", cfg.MaxUsernameLength+1))}},
+		{"password below the configured minimum", domain.UserEdit{Password: ptr(strings.Repeat("p", cfg.MinPasswordLength-1))}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, tt.username, "", tt.newPassword)
+			_, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, tt.edit)
 			if !errors.Is(err, apperr.ErrValidation) {
 				t.Errorf("Update() error = %v, want apperr.ErrValidation", err)
 			}
@@ -263,7 +262,7 @@ func TestUserUseCase_Update_RejectsRenameToReservedAdminName(t *testing.T) {
 
 	for _, name := range []string{"admin", "Admin", "  ADMIN  "} {
 		t.Run(name, func(t *testing.T) {
-			_, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, name, "", "")
+			_, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, domain.UserEdit{Username: &name})
 			if !errors.Is(err, apperr.ErrConflict) {
 				t.Errorf("Update(%q) error = %v, want apperr.ErrConflict", name, err)
 			}
@@ -279,7 +278,7 @@ func TestUserUseCase_Update_RenameAllowedWithoutBootstrapAdmin(t *testing.T) {
 	uc, repo := newUserUseCaseForTest(t) // testUserConfig leaves AdminUsername empty
 	created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: "h"})
 
-	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, "admin", "", "")
+	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, domain.UserEdit{Username: ptr("admin")})
 	if err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
@@ -293,7 +292,7 @@ func TestUserUseCase_Update_OnlySuppliedFieldsAreSent(t *testing.T) {
 	uc := NewUserUseCase(repo, testHasher(t), testUserConfig(), silentLogger())
 	created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: "h"})
 
-	if _, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, "", "new@example.com", ""); err != nil {
+	if _, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, domain.UserEdit{Email: ptr("new@example.com")}); err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
 
@@ -311,11 +310,19 @@ func TestUserUseCase_Update_OnlySuppliedFieldsAreSent(t *testing.T) {
 type recordingUserRepo struct {
 	*fakeUserRepo
 	lastFields domain.UserUpdate
+	updates    int
 }
 
 func (r *recordingUserRepo) Update(ctx context.Context, id int64, fields domain.UserUpdate) (domain.User, error) {
 	r.lastFields = fields
+	r.updates++
 	return r.fakeUserRepo.Update(ctx, id, fields)
+}
+
+func (r *recordingUserRepo) UpdateAndRevokeSessions(ctx context.Context, id int64, fields domain.UserUpdate) (domain.User, int64, error) {
+	r.lastFields = fields
+	r.updates++
+	return r.fakeUserRepo.UpdateAndRevokeSessions(ctx, id, fields)
 }
 
 func TestUserUseCase_Update_CountsCharactersNotBytes(t *testing.T) {
@@ -337,7 +344,7 @@ func TestUserUseCase_Update_CountsCharactersNotBytes(t *testing.T) {
 			uc, repo := newUserUseCaseForTest(t)
 			created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: "h"})
 
-			_, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, tt.username, "", "")
+			_, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, domain.UserEdit{Username: &tt.username})
 			if tt.wantErr {
 				if !errors.Is(err, apperr.ErrValidation) {
 					t.Errorf("Update(%d chars) error = %v, want apperr.ErrValidation", utf8.RuneCountInString(tt.username), err)
@@ -396,7 +403,7 @@ func TestUserUseCase_Update_RejectsAMalformedEmail(t *testing.T) {
 		t.Fatalf("seed user: %v", err)
 	}
 
-	_, err = uc.Update(context.Background(), domain.Claims{UserID: seeded.ID}, seeded.ID, "", "not-an-email", "")
+	_, err = uc.Update(context.Background(), domain.Claims{UserID: seeded.ID}, seeded.ID, domain.UserEdit{Email: ptr("not-an-email")})
 	if !errors.Is(err, apperr.ErrValidation) {
 		t.Errorf("Update() with a malformed email = %v, want apperr.ErrValidation", err)
 	}
@@ -407,5 +414,92 @@ func TestUserUseCase_Update_RejectsAMalformedEmail(t *testing.T) {
 	}
 	if stored.Email != "mary@example.com" {
 		t.Errorf("the stored email became %q; a rejected update must change nothing", stored.Email)
+	}
+}
+
+func TestUserUseCase_Update_RejectsAnEditWithNothingInIt(t *testing.T) {
+	repo := &recordingUserRepo{fakeUserRepo: newFakeUserRepo()}
+	uc := NewUserUseCase(repo, testHasher(t), testUserConfig(), silentLogger())
+	created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: "h"})
+
+	_, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, domain.UserEdit{})
+	if !errors.Is(err, apperr.ErrValidation) {
+		t.Errorf("Update() with an empty edit = %v, want apperr.ErrValidation", err)
+	}
+	if repo.updates != 0 {
+		t.Errorf("the repository was asked to update %d time(s) for an edit that carried nothing", repo.updates)
+	}
+}
+
+func TestUserUseCase_Update_RejectsAFieldThatIsPresentAndEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit domain.UserEdit
+	}{
+		{"empty username", domain.UserEdit{Username: ptr("")}},
+		{"username of nothing but spaces", domain.UserEdit{Username: ptr("   ")}},
+		{"empty email", domain.UserEdit{Email: ptr("")}},
+		{"email of nothing but spaces", domain.UserEdit{Email: ptr("   ")}},
+		{"empty password", domain.UserEdit{Password: ptr("")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &recordingUserRepo{fakeUserRepo: newFakeUserRepo()}
+			uc := NewUserUseCase(repo, testHasher(t), testUserConfig(), silentLogger())
+			created, _ := repo.Create(context.Background(), domain.User{
+				Username: "alice", Email: "a@example.com", PasswordHash: "h",
+			})
+
+			if _, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, tc.edit); !errors.Is(err, apperr.ErrValidation) {
+				t.Errorf("Update() = %v, want apperr.ErrValidation", err)
+			}
+			if repo.updates != 0 {
+				t.Errorf("the repository was asked to update %d time(s) for a rejected edit", repo.updates)
+			}
+
+			stored, err := repo.GetByID(context.Background(), created.ID)
+			if err != nil {
+				t.Fatalf("GetByID(): %v", err)
+			}
+			if stored.Username != "alice" || stored.Email != "a@example.com" || stored.PasswordHash != "h" {
+				t.Errorf("a rejected edit changed the stored user: %+v", stored)
+			}
+		})
+	}
+}
+
+func TestUserUseCase_Update_TrimsAValueThatWasActuallySent(t *testing.T) {
+	repo := &recordingUserRepo{fakeUserRepo: newFakeUserRepo()}
+	uc := NewUserUseCase(repo, testHasher(t), testUserConfig(), silentLogger())
+	created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: "h"})
+
+	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, domain.UserEdit{
+		Username: ptr("  bob  "),
+		Email:    ptr("  bob@example.com  "),
+	})
+	if err != nil {
+		t.Fatalf("Update() unexpected error: %v", err)
+	}
+	if updated.Username != "bob" {
+		t.Errorf("Username = %q, want %q", updated.Username, "bob")
+	}
+	if updated.Email != "bob@example.com" {
+		t.Errorf("Email = %q, want %q", updated.Email, "bob@example.com")
+	}
+}
+
+func TestUserUseCase_Update_KeepsThePasswordExactlyAsSent(t *testing.T) {
+	uc, repo := newUserUseCaseForTest(t)
+	created, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: "h"})
+
+	const withSpaces = "  spaced-password  "
+	updated, err := uc.Update(context.Background(), domain.Claims{IsAdmin: true}, created.ID, domain.UserEdit{Password: ptr(withSpaces)})
+	if err != nil {
+		t.Fatalf("Update() unexpected error: %v", err)
+	}
+	if !hasherMatches(t, updated.PasswordHash, withSpaces) {
+		t.Error("the password was stored as something other than what was sent")
+	}
+	if hasherMatches(t, updated.PasswordHash, strings.TrimSpace(withSpaces)) {
+		t.Error("the trimmed password also opens the account; the spaces were dropped")
 	}
 }

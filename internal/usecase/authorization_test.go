@@ -19,7 +19,7 @@ func TestUserAuthorizationBeforeAnyDependency(t *testing.T) {
 			}
 			_, getErr := uc.Get(context.Background(), actor, 1)
 			_, listErr := uc.List(context.Background(), actor, domain.PageRequest{})
-			_, updateErr := uc.Update(context.Background(), actor, 1, "", "", "new-password")
+			_, updateErr := uc.Update(context.Background(), actor, 1, domain.UserEdit{Password: ptr("new-password")})
 			deleteErr := uc.Delete(context.Background(), actor, 1)
 			for _, err := range []error{getErr, listErr, updateErr, deleteErr} {
 				if !errors.Is(err, want) {
@@ -44,7 +44,7 @@ func TestUserAuthorizationSelfAndAdmin(t *testing.T) {
 		if _, err := uc.Get(context.Background(), actor, user.ID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := uc.Update(context.Background(), actor, user.ID, "alice2", "", ""); err != nil {
+		if _, err := uc.Update(context.Background(), actor, user.ID, domain.UserEdit{Username: ptr("alice2")}); err != nil {
 			t.Fatal(err)
 		}
 		_, err = uc.List(context.Background(), actor, domain.PageRequest{})
