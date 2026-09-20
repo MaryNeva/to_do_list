@@ -77,7 +77,15 @@ func (f *fakeRefreshRepo) Rotate(
 		return domain.RotateResult{}, apperr.ErrNotFound
 	}
 	if presented.RevokedAt != nil {
-		return domain.RotateResult{UserID: presented.UserID, Username: f.usernameOf(presented.UserID)}, apperr.ErrConflict
+		revoked, err := f.revokeAllLocked(presented.UserID)
+		if err != nil {
+			return domain.RotateResult{}, fmt.Errorf("revoke sessions after refresh token reuse: %w", err)
+		}
+		return domain.RotateResult{
+			UserID:          presented.UserID,
+			Username:        f.usernameOf(presented.UserID),
+			SessionsRevoked: revoked,
+		}, apperr.ErrTokenReuse
 	}
 	if !now.Before(presented.ExpiresAt) {
 		return domain.RotateResult{UserID: presented.UserID, Username: f.usernameOf(presented.UserID)},
@@ -142,6 +150,10 @@ func (f *fakeRefreshRepo) RevokeAllForUser(_ context.Context, userID int64) (int
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	return f.revokeAllLocked(userID)
+}
+
+func (f *fakeRefreshRepo) revokeAllLocked(userID int64) (int64, error) {
 	if f.revokeAllErr != nil {
 		return 0, f.revokeAllErr
 	}

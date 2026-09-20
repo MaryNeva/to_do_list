@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -19,7 +20,6 @@ type Check struct {
 type checkResult struct {
 	Status     string  `json:"status"`
 	DurationMS float64 `json:"duration_ms"`
-	Error      string  `json:"error,omitempty"`
 }
 
 func HealthHandler(build buildinfo.Info) fiber.Handler {
@@ -31,7 +31,7 @@ func HealthHandler(build buildinfo.Info) fiber.Handler {
 	}
 }
 
-func ReadyHandler(timeout time.Duration, checks ...Check) fiber.Handler {
+func ReadyHandler(logger *slog.Logger, timeout time.Duration, checks ...Check) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		results := make(map[string]checkResult, len(checks))
 		status := fiber.StatusOK
@@ -50,8 +50,12 @@ func ReadyHandler(timeout time.Duration, checks ...Check) fiber.Handler {
 
 			if err != nil {
 				result.Status = "unavailable"
-				result.Error = err.Error()
 				status = fiber.StatusServiceUnavailable
+				logger.LogAttrs(c.UserContext(), slog.LevelError, "readiness check failed",
+					slog.String("check", check.Name),
+					slog.String("error", err.Error()),
+					slog.Duration("elapsed", elapsed),
+				)
 			}
 
 			results[check.Name] = result

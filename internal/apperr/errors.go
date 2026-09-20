@@ -25,6 +25,13 @@ var (
 	// perform the requested action on the resource.
 	ErrForbidden = errors.New("forbidden")
 
+	// ErrTokenReuse means a refresh token that had already been consumed was
+	// presented again. It is deliberately not ErrConflict: that one also
+	// covers a newly generated token colliding with a stored hash, which is
+	// a generator problem and must not be answered by ending every session
+	// the account has.
+	ErrTokenReuse = errors.New("refresh token was already used")
+
 	// ErrValidation means the caller supplied malformed input.
 	ErrValidation = errors.New("validation failed")
 )

@@ -5,9 +5,11 @@ package postgres
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -44,20 +46,68 @@ func applyMigrations(t *testing.T, dsn string) {
 	}
 }
 
-func setupTestPool(t *testing.T) *pgxpool.Pool {
+func testPoolConfig() PoolConfig {
+	return PoolConfig{
+		MaxConns:       8,
+		MinConns:       1,
+		MaxConnLife:    time.Hour,
+		MaxConnIdle:    30 * time.Minute,
+		ConnectTimeout: 5 * time.Second,
+	}
+}
+
+func testDSN(t *testing.T) string {
 	t.Helper()
 
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
+		if os.Getenv("CI") != "" {
+			t.Fatal("TEST_DATABASE_URL is not set, but CI is: the integration job must run against a real database, not skip")
+		}
 		t.Skip("TEST_DATABASE_URL not set; skipping Postgres integration test")
 	}
+
+	requireTestDatabase(t, dsn)
+	return dsn
+}
+
+// Every test here starts by truncating the schema, so pointing the suite at
+// a development database costs its contents. The name has to say it is a
+// test database; TEST_DATABASE_ALLOW_ANY_NAME=1 is the deliberate override.
+func requireTestDatabase(t *testing.T, dsn string) {
+	t.Helper()
+
+	if os.Getenv("TEST_DATABASE_ALLOW_ANY_NAME") == "1" {
+		return
+	}
+
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("TEST_DATABASE_URL is not a URL: %v", err)
+	}
+
+	// A suffix, not a substring: "latest" contains "test" and is not a test
+	// database, and the cost of being wrong here is the contents of whatever
+	// the URL points at.
+	name := strings.TrimPrefix(parsed.Path, "/")
+	if !strings.HasSuffix(name, "_test") {
+		t.Fatalf("TEST_DATABASE_URL points at database %q, and these tests TRUNCATE every table. "+
+			"Use a database whose name ends in _test (for example %s_test), "+
+			"or set TEST_DATABASE_ALLOW_ANY_NAME=1 if you really mean this one.", name, name)
+	}
+}
+
+func setupTestPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+
+	dsn := testDSN(t)
 
 	applyMigrations(t, dsn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	pool, err := NewPool(ctx, dsn, 5*time.Second)
+	pool, err := NewPool(ctx, dsn, testPoolConfig())
 	if err != nil {
 		t.Fatalf("connect to test database: %v", err)
 	}
@@ -368,3 +418,87 @@ func TestConcurrent_TwoPartialUpdatesBothSurvive(t *testing.T) {
 func strPtr(s string) *string { return &s }
 
 func taskStatusPtr(s domain.TaskStatus) *domain.TaskStatus { return &s }
+
+// pgx otherwise opens four connections per core and keeps them forever:
+// a number unrelated to what Postgres can serve, held across a restart of it.
+func TestNewPool_AppliesTheConfiguredBounds(t *testing.T) {
+	dsn := testDSN(t)
+
+	want := PoolConfig{
+		MaxConns:       3,
+		MinConns:       1,
+		MaxConnLife:    17 * time.Minute,
+		MaxConnIdle:    5 * time.Minute,
+		ConnectTimeout: 4 * time.Second,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := NewPool(ctx, dsn, want)
+	if err != nil {
+		t.Fatalf("NewPool(): %v", err)
+	}
+	defer pool.Close()
+
+	got := pool.Config()
+	switch {
+	case got.MaxConns != want.MaxConns:
+		t.Errorf("MaxConns = %d, want %d", got.MaxConns, want.MaxConns)
+	case got.MinConns != want.MinConns:
+		t.Errorf("MinConns = %d, want %d", got.MinConns, want.MinConns)
+	case got.MaxConnLifetime != want.MaxConnLife:
+		t.Errorf("MaxConnLifetime = %s, want %s", got.MaxConnLifetime, want.MaxConnLife)
+	case got.MaxConnIdleTime != want.MaxConnIdle:
+		t.Errorf("MaxConnIdleTime = %s, want %s", got.MaxConnIdleTime, want.MaxConnIdle)
+	case got.ConnConfig.ConnectTimeout != want.ConnectTimeout:
+		t.Errorf("ConnectTimeout = %s, want %s", got.ConnConfig.ConnectTimeout, want.ConnectTimeout)
+	}
+
+	if stat := pool.Stat(); stat.MaxConns() != want.MaxConns {
+		t.Errorf("the live pool reports MaxConns = %d, want %d", stat.MaxConns(), want.MaxConns)
+	}
+}
+
+// The ceiling has to be real: with three connections a fourth query waits
+// rather than opening a connection the database never agreed to.
+func TestNewPool_QueriesWaitForTheCeilingRatherThanExceedIt(t *testing.T) {
+	dsn := testDSN(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	pool, err := NewPool(ctx, dsn, PoolConfig{
+		MaxConns: 2, MinConns: 1,
+		MaxConnLife: time.Hour, MaxConnIdle: time.Minute, ConnectTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewPool(): %v", err)
+	}
+	defer pool.Close()
+
+	held := make([]*pgxpool.Conn, 0, 2)
+	for i := 0; i < 2; i++ {
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("acquire %d: %v", i+1, err)
+		}
+		held = append(held, conn)
+	}
+
+	full, cancelFull := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancelFull()
+	if _, err := pool.Acquire(full); err == nil {
+		t.Error("a third connection was handed out although the pool allows two")
+	}
+
+	held[0].Release()
+	freed, cancelFreed := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelFreed()
+	conn, err := pool.Acquire(freed)
+	if err != nil {
+		t.Fatalf("acquiring a released connection: %v", err)
+	}
+	conn.Release()
+	held[1].Release()
+}

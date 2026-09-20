@@ -1,11 +1,14 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,12 +19,19 @@ import (
 
 func probeApp(t *testing.T, checks ...Check) *fiber.App {
 	t.Helper()
+	app, _ := probeAppWithLogs(t, checks...)
+	return app
+}
 
+func probeAppWithLogs(t *testing.T, checks ...Check) (*fiber.App, *bytes.Buffer) {
+	t.Helper()
+
+	var logs bytes.Buffer
 	app := fiber.New(fiber.Config{ErrorHandler: NewErrorHandler(silentLogger())})
 	app.Get("/healthz", HealthHandler(buildinfo.Info{Version: "1.2.3", Commit: "abc123"}))
-	app.Get("/readyz", ReadyHandler(time.Second, checks...))
+	app.Get("/readyz", ReadyHandler(slog.New(slog.NewJSONHandler(&logs, nil)), time.Second, checks...))
 
-	return app
+	return app, &logs
 }
 
 func call(t *testing.T, app *fiber.App, path string) (int, map[string]any) {
@@ -121,8 +131,8 @@ func TestReadyHandler_NamesTheFailingDependency(t *testing.T) {
 	if postgres["status"] != "unavailable" {
 		t.Errorf("postgres.status = %v, want %q", postgres["status"], "unavailable")
 	}
-	if postgres["error"] != "connection refused" {
-		t.Errorf("postgres.error = %v, want the probe's message", postgres["error"])
+	if _, reported := postgres["error"]; reported {
+		t.Error("the failing check published a reason; /readyz is unauthenticated")
 	}
 
 	cache := checks["cache"].(map[string]any)
@@ -141,7 +151,7 @@ func TestReadyHandler_StopsAProbeThatOverrunsItsBudget(t *testing.T) {
 	}
 
 	app := fiber.New(fiber.Config{ErrorHandler: NewErrorHandler(silentLogger())})
-	app.Get("/readyz", ReadyHandler(20*time.Millisecond, Check{Name: "postgres", Probe: blocking}))
+	app.Get("/readyz", ReadyHandler(silentLogger(), 20*time.Millisecond, Check{Name: "postgres", Probe: blocking}))
 
 	start := time.Now()
 	status, body := call(t, app, "/readyz")
@@ -157,5 +167,40 @@ func TestReadyHandler_StopsAProbeThatOverrunsItsBudget(t *testing.T) {
 	postgres := body["checks"].(map[string]any)["postgres"].(map[string]any)
 	if postgres["status"] != "unavailable" {
 		t.Errorf("postgres.status = %v, want %q", postgres["status"], "unavailable")
+	}
+}
+
+func TestReadyHandler_KeepsTheReasonOutOfTheResponse(t *testing.T) {
+	leak := "failed to connect to `user=todo_user database=to_do_prod`: " +
+		"db.internal.example:5432: connection refused"
+
+	app, logs := probeAppWithLogs(t, Check{
+		Name:  "postgres",
+		Probe: func(context.Context) error { return errors.New(leak) },
+	})
+
+	resp, err := app.Test(httptest.NewRequest(fiber.MethodGet, "/readyz", nil))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != fiber.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+
+	for _, secret := range []string{"todo_user", "to_do_prod", "db.internal.example", "5432"} {
+		if strings.Contains(string(raw), secret) {
+			t.Errorf("the response leaked %q: %s", secret, raw)
+		}
+	}
+	if !strings.Contains(string(raw), "postgres") {
+		t.Errorf("the response does not name the failing check: %s", raw)
+	}
+
+	// The operator still needs the reason, so it has to be in the log.
+	if !strings.Contains(logs.String(), "db.internal.example") {
+		t.Errorf("the reason reached neither the client nor the log: %s", logs.String())
 	}
 }

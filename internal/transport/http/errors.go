@@ -23,6 +23,7 @@ const (
 	CodeInvalidCredentials = "invalid_credentials"
 	CodeForbidden          = "forbidden"
 	CodeMethodNotAllowed   = "method_not_allowed"
+	CodePayloadTooLarge    = "payload_too_large"
 	CodeRateLimited        = "rate_limited"
 	CodeInternal           = "internal_error"
 )
@@ -94,6 +95,8 @@ func CodeFor(err error) string {
 		return CodeMethodNotAllowed
 	case status == fiber.StatusConflict:
 		return CodeConflict
+	case status == fiber.StatusRequestEntityTooLarge:
+		return CodePayloadTooLarge
 	case status == fiber.StatusTooManyRequests:
 		return CodeRateLimited
 	case status >= 400 && status < 500:
