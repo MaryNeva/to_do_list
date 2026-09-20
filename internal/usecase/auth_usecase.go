@@ -84,6 +84,9 @@ func (a *AuthUseCase) register(ctx context.Context, username, email, plainPasswo
 	if username == "" || email == "" || plainPassword == "" {
 		return domain.User{}, fmt.Errorf("%w: username, email and password are required", apperr.ErrValidation)
 	}
+	if err := validateEmail(email); err != nil {
+		return domain.User{}, err
+	}
 	if err := validateUsername(username, a.cfg.MinUsernameLength, a.cfg.MaxUsernameLength); err != nil {
 		return domain.User{}, err
 	}
@@ -95,7 +98,7 @@ func (a *AuthUseCase) register(ctx context.Context, username, email, plainPasswo
 		return domain.User{}, err
 	}
 
-	hash, err := a.hasher.Hash(plainPassword)
+	hash, err := a.hasher.Hash(ctx, plainPassword)
 	if err != nil {
 		return domain.User{}, fmt.Errorf("hash password: %w", err)
 	}
@@ -129,8 +132,11 @@ func (a *AuthUseCase) login(ctx context.Context, username, plainPassword string)
 	username = normalizeUsername(username)
 
 	if isReservedUsername(a.cfg.AdminUsername, username) {
-		if err := password.Verify(a.cfg.AdminPasswordHash, plainPassword); err != nil {
-			return domain.Tokens{}, domain.User{}, apperr.ErrInvalidCredentials
+		if err := a.hasher.Verify(ctx, a.cfg.AdminPasswordHash, plainPassword); err != nil {
+			if errors.Is(err, password.ErrMismatch) {
+				return domain.Tokens{}, domain.User{}, apperr.ErrInvalidCredentials
+			}
+			return domain.Tokens{}, domain.User{}, fmt.Errorf("verify admin password: %w", err)
 		}
 		admin := domain.User{ID: 0, Username: normalizeUsername(a.cfg.AdminUsername)}
 		access, expiresAt, err := a.tokens.Generate(admin.ID, admin.Username, true)
@@ -149,8 +155,13 @@ func (a *AuthUseCase) login(ctx context.Context, username, plainPassword string)
 		return domain.Tokens{}, domain.User{}, fmt.Errorf("get user: %w", err)
 	}
 
-	if !password.Matches(user.PasswordHash, plainPassword) {
-		return domain.Tokens{}, domain.User{}, apperr.ErrInvalidCredentials
+	// Anything other than a mismatch means the comparison never ran - most
+	// likely the hashing queue is full - and must not read as a bad password.
+	if err := a.hasher.Verify(ctx, user.PasswordHash, plainPassword); err != nil {
+		if errors.Is(err, password.ErrMismatch) {
+			return domain.Tokens{}, domain.User{}, apperr.ErrInvalidCredentials
+		}
+		return domain.Tokens{}, domain.User{}, fmt.Errorf("verify password: %w", err)
 	}
 
 	tokens, err := a.issueTokens(ctx, user)
@@ -184,17 +195,16 @@ func (a *AuthUseCase) Refresh(ctx context.Context, refreshToken string) (domain.
 	switch {
 	case err == nil:
 		a.metrics.RefreshRotation(OutcomeSuccess)
-	case errors.Is(err, apperr.ErrConflict):
+	case errors.Is(err, apperr.ErrTokenReuse):
 		a.metrics.RefreshRotation(OutcomeReuse)
-
-		revoked, revokeErr := a.refresh.RevokeAllForUser(ctx, result.UserID)
-		if revokeErr != nil {
-			a.logger.ErrorContext(ctx, "revoking sessions after refresh token reuse failed", "error", revokeErr, "user_id", result.UserID)
-		} else {
-			a.metrics.SessionsRevoked(ReasonTokenReuse, revoked)
-		}
-		a.logger.WarnContext(ctx, "refresh token reused after it was consumed", "user_id", result.UserID)
+		a.metrics.SessionsRevoked(ReasonTokenReuse, result.SessionsRevoked)
+		a.logger.WarnContext(ctx, "refresh token reused after it was consumed",
+			"user_id", result.UserID, "sessions_revoked", result.SessionsRevoked)
 		return domain.Tokens{}, fmt.Errorf("%w: refresh token is no longer valid", apperr.ErrUnauthorized)
+	case errors.Is(err, apperr.ErrConflict):
+		a.metrics.RefreshRotation(OutcomeFailure)
+		a.logger.ErrorContext(ctx, "generated refresh token collided with an existing one")
+		return domain.Tokens{}, fmt.Errorf("rotate refresh token: %w", err)
 	case errors.Is(err, apperr.ErrNotFound):
 		a.metrics.RefreshRotation(OutcomeUnknown)
 		return domain.Tokens{}, fmt.Errorf("%w: unknown refresh token", apperr.ErrUnauthorized)

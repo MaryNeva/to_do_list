@@ -71,7 +71,7 @@ func TestAuthUseCase_Register(t *testing.T) {
 	if user.PasswordHash == "s3cret-pass" || user.PasswordHash == "" {
 		t.Error("Register() must store a hashed password, not plaintext or empty")
 	}
-	if !password.Matches(user.PasswordHash, "s3cret-pass") {
+	if !hasherMatches(t, user.PasswordHash, "s3cret-pass") {
 		t.Error("Register() stored hash does not verify against the original password")
 	}
 }
@@ -100,7 +100,7 @@ func TestAuthUseCase_Register_MissingFields(t *testing.T) {
 func TestAuthUseCase_Login_Success(t *testing.T) {
 	uc, repo, _ := newAuthUseCaseForTest(t, "", "")
 
-	hash, _ := testHasher(t).Hash("s3cret-pass")
+	hash, _ := testHasher(t).Hash(context.Background(), "s3cret-pass")
 	repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
 
 	tokens, user, err := uc.Login(context.Background(), "alice", "s3cret-pass")
@@ -120,7 +120,7 @@ func TestAuthUseCase_Login_Success(t *testing.T) {
 
 func TestAuthUseCase_Login_WrongPassword(t *testing.T) {
 	uc, repo, _ := newAuthUseCaseForTest(t, "", "")
-	hash, _ := testHasher(t).Hash("s3cret-pass")
+	hash, _ := testHasher(t).Hash(context.Background(), "s3cret-pass")
 	repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
 
 	_, _, err := uc.Login(context.Background(), "alice", "wrong-password")
@@ -139,7 +139,7 @@ func TestAuthUseCase_Login_UnknownUser_SameErrorAsWrongPassword(t *testing.T) {
 }
 
 func TestAuthUseCase_Login_AdminBootstrap(t *testing.T) {
-	adminHash, _ := testHasher(t).Hash("admin-pass")
+	adminHash, _ := testHasher(t).Hash(context.Background(), "admin-pass")
 	uc, _, _ := newAuthUseCaseForTest(t, "admin", adminHash)
 
 	tokens, user, err := uc.Login(context.Background(), "admin", "admin-pass")
@@ -193,7 +193,7 @@ func TestAuthUseCase_Register_EnforcesConfiguredLengthPolicy(t *testing.T) {
 }
 
 func TestAuthUseCase_Register_RejectsReservedAdminName(t *testing.T) {
-	adminHash, _ := testHasher(t).Hash("admin-pass")
+	adminHash, _ := testHasher(t).Hash(context.Background(), "admin-pass")
 
 	for _, name := range []string{"admin", "Admin", "ADMIN", "  admin  "} {
 		t.Run(name, func(t *testing.T) {
@@ -224,7 +224,7 @@ func TestAuthUseCase_Register_NameNotReservedWithoutBootstrapAdmin(t *testing.T)
 }
 
 func TestAuthUseCase_Login_BootstrapAdminNameIsMatchedConsistently(t *testing.T) {
-	adminHash, _ := testHasher(t).Hash("admin-pass")
+	adminHash, _ := testHasher(t).Hash(context.Background(), "admin-pass")
 	uc, _, _ := newAuthUseCaseForTest(t, "admin", adminHash)
 
 	for _, name := range []string{"admin", "Admin", " ADMIN "} {
@@ -291,7 +291,7 @@ func TestAuthUseCase_Register_PasswordMinimumIsCharactersCapIsBytes(t *testing.T
 
 func TestAuthUseCase_Login_IssuesRefreshToken(t *testing.T) {
 	uc, repo, _, refresh := newAuthUseCaseWithRefresh(t, "", "")
-	hash, _ := testHasher(t).Hash("s3cret-pass")
+	hash, _ := testHasher(t).Hash(context.Background(), "s3cret-pass")
 	repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
 
 	tokens, _, err := uc.Login(context.Background(), "alice", "s3cret-pass")
@@ -316,7 +316,7 @@ func TestAuthUseCase_Login_IssuesRefreshToken(t *testing.T) {
 
 func TestAuthUseCase_Refresh_RotatesAndRevokesTheOldToken(t *testing.T) {
 	uc, repo, _, refresh := newAuthUseCaseWithRefresh(t, "", "")
-	hash, _ := testHasher(t).Hash("s3cret-pass")
+	hash, _ := testHasher(t).Hash(context.Background(), "s3cret-pass")
 	repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
 
 	first, _, err := uc.Login(context.Background(), "alice", "s3cret-pass")
@@ -344,7 +344,7 @@ func TestAuthUseCase_Refresh_RotatesAndRevokesTheOldToken(t *testing.T) {
 
 func TestAuthUseCase_Refresh_ReuseOfRevokedTokenKillsEverySession(t *testing.T) {
 	uc, repo, _, refresh := newAuthUseCaseWithRefresh(t, "", "")
-	hash, _ := testHasher(t).Hash("s3cret-pass")
+	hash, _ := testHasher(t).Hash(context.Background(), "s3cret-pass")
 	user, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
 
 	stolen, _, _ := uc.Login(context.Background(), "alice", "s3cret-pass")
@@ -371,7 +371,7 @@ func TestAuthUseCase_Refresh_ReuseOfRevokedTokenKillsEverySession(t *testing.T) 
 
 func TestAuthUseCase_Logout_RevokesTheSession(t *testing.T) {
 	uc, repo, _, _ := newAuthUseCaseWithRefresh(t, "", "")
-	hash, _ := testHasher(t).Hash("s3cret-pass")
+	hash, _ := testHasher(t).Hash(context.Background(), "s3cret-pass")
 	repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
 
 	tokens, _, _ := uc.Login(context.Background(), "alice", "s3cret-pass")
@@ -394,7 +394,7 @@ func TestAuthUseCase_Logout_UnknownTokenIsNotAnError(t *testing.T) {
 
 func TestAuthUseCase_Refresh_ExpiredTokenRejected(t *testing.T) {
 	uc, repo, _, refresh := newAuthUseCaseWithRefresh(t, "", "")
-	hash, _ := testHasher(t).Hash("s3cret-pass")
+	hash, _ := testHasher(t).Hash(context.Background(), "s3cret-pass")
 	user, _ := repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
 
 	issuer := &fakeIssuer{}
@@ -411,7 +411,7 @@ func TestAuthUseCase_Refresh_ExpiredTokenRejected(t *testing.T) {
 }
 
 func TestAuthUseCase_Login_BootstrapAdminGetsNoRefreshToken(t *testing.T) {
-	adminHash, _ := testHasher(t).Hash("admin-pass")
+	adminHash, _ := testHasher(t).Hash(context.Background(), "admin-pass")
 	uc, _, _, _ := newAuthUseCaseWithRefresh(t, "admin", adminHash)
 
 	tokens, user, err := uc.Login(context.Background(), "admin", "admin-pass")
@@ -431,7 +431,7 @@ func TestAuthUseCase_Login_BootstrapAdminGetsNoRefreshToken(t *testing.T) {
 
 func TestAuthUseCase_Login_IsCaseInsensitiveOnUsername(t *testing.T) {
 	uc, repo, _, _ := newAuthUseCaseWithRefresh(t, "", "")
-	hash, _ := testHasher(t).Hash("s3cret-pass")
+	hash, _ := testHasher(t).Hash(context.Background(), "s3cret-pass")
 	repo.Create(context.Background(), domain.User{Username: "Alice", Email: "a@example.com", PasswordHash: hash})
 
 	for _, name := range []string{"alice", "ALICE", " Alice "} {
@@ -456,7 +456,7 @@ func TestAuthUseCase_Register_RejectsNameTakenInAnotherCase(t *testing.T) {
 
 func TestAuthUseCase_Refresh_RollsBackWhenTheReplacementCannotBeStored(t *testing.T) {
 	uc, repo, _, refresh := newAuthUseCaseWithRefresh(t, "", "")
-	hash, _ := testHasher(t).Hash("s3cret-pass")
+	hash, _ := testHasher(t).Hash(context.Background(), "s3cret-pass")
 	repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
 
 	tokens, _, err := uc.Login(context.Background(), "alice", "s3cret-pass")
@@ -477,7 +477,7 @@ func TestAuthUseCase_Refresh_RollsBackWhenTheReplacementCannotBeStored(t *testin
 
 func TestAuthUseCase_Refresh_OnlyOneConcurrentCallerWins(t *testing.T) {
 	uc, repo, _, _ := newAuthUseCaseWithRefresh(t, "", "")
-	hash, _ := testHasher(t).Hash("s3cret-pass")
+	hash, _ := testHasher(t).Hash(context.Background(), "s3cret-pass")
 	repo.Create(context.Background(), domain.User{Username: "alice", Email: "a@example.com", PasswordHash: hash})
 
 	tokens, _, err := uc.Login(context.Background(), "alice", "s3cret-pass")
@@ -603,5 +603,72 @@ func TestAuthUseCase_Refresh_AccessTokenKeepsTheUsername(t *testing.T) {
 	want := fmt.Sprintf("token-for-%d-%s-admin:false", user.ID, user.Username)
 	if refreshed.AccessToken != want {
 		t.Errorf("access token = %q, want %q", refreshed.AccessToken, want)
+	}
+}
+
+// A login that never reached bcrypt has not failed authentication. Reporting
+// it as invalid credentials would tell an honest user their password is
+// wrong, and would hide an overloaded process behind a 401.
+func TestAuthUseCase_Login_AFullHashingQueueIsNotABadPassword(t *testing.T) {
+	repo := newFakeUserRepo()
+	refresh := newFakeRefreshRepo()
+	refresh.lookupUsername = func(id int64) string { return repo.users[id].Username }
+	refresh.currentCredentialsVersion = func(id int64) int64 { return repo.users[id].CredentialsVersion }
+
+	hasher := testHasher(t)
+	hash, err := hasher.Hash(context.Background(), "s3cret-pass")
+	if err != nil {
+		t.Fatalf("Hash(): %v", err)
+	}
+	if _, err := repo.Create(context.Background(), domain.User{
+		Username: "alice", Email: "alice@example.com", PasswordHash: hash,
+	}); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	uc := NewAuthUseCase(repo, &fakeTokenService{}, refresh, &fakeIssuer{}, hasher, AuthConfig{
+		Timeout:           time.Second,
+		MinUsernameLength: 3,
+		MaxUsernameLength: 50,
+		MinPasswordLength: 8,
+		RefreshTTL:        720 * time.Hour,
+	}, silentLogger())
+
+	// A caller whose budget is already spent stands for one that waited out
+	// its turn in the queue: the hasher refuses before running bcrypt.
+	spent, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err = uc.Login(spent, "alice", "s3cret-pass")
+
+	if err == nil {
+		t.Fatal("Login() with no time left should fail")
+	}
+	if errors.Is(err, apperr.ErrInvalidCredentials) {
+		t.Errorf("Login() error = %v, want anything but invalid credentials - the password was never compared", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Login() error = %v, want it to carry the reason the work was refused", err)
+	}
+}
+
+// A stored hash that bcrypt cannot read is a broken row, not a bad password.
+// Answering 401 would tell an honest user their password is wrong and hide
+// the corruption from whoever could fix it.
+func TestAuthUseCase_Login_ABrokenStoredHashIsNotInvalidCredentials(t *testing.T) {
+	uc, repo, _ := newAuthUseCaseForTest(t, "", "")
+
+	if _, err := repo.Create(context.Background(), domain.User{
+		Username: "alice", Email: "alice@example.com", PasswordHash: "truncated-nonsense",
+	}); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	_, _, err := uc.Login(context.Background(), "alice", "s3cret-pass")
+	if err == nil {
+		t.Fatal("Login() against an unreadable hash should fail")
+	}
+	if errors.Is(err, apperr.ErrInvalidCredentials) {
+		t.Errorf("Login() error = %v, want anything but invalid credentials", err)
 	}
 }

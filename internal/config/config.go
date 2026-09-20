@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"to-do-list/internal/auth/password"
 )
 
 // Config is the fully resolved and validated process configuration.
@@ -25,6 +27,9 @@ type Config struct {
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
 	ShutdownTimeout time.Duration
+	MaxBodyBytes    int
+	TrustedProxies  []string
+	ProxyHeader     string
 
 	DBHost           string
 	DBPort           uint16
@@ -34,6 +39,10 @@ type Config struct {
 	DBSSLMode        string
 	DBConnectTimeout time.Duration
 	DBCallTimeout    time.Duration
+	DBMaxConns       int
+	DBMinConns       int
+	DBMaxConnLife    time.Duration
+	DBMaxConnIdle    time.Duration
 
 	JWTSecret          string
 	JWTTTL             time.Duration
@@ -41,8 +50,9 @@ type Config struct {
 	JWTIssuer          string
 	JWTMinSecretLength int
 
-	PasswordBcryptCost int
-	PasswordMinLength  int
+	PasswordBcryptCost    int
+	PasswordMinLength     int
+	PasswordMaxConcurrent int
 
 	UsernameMinLength int
 	UsernameMaxLength int
@@ -77,6 +87,7 @@ type Config struct {
 	MetricsEnabled   bool
 	MetricsPath      string
 	MetricsNamespace string
+	MetricsAddress   string
 }
 
 const (
@@ -113,6 +124,9 @@ func LoadFrom(configPath, envPath string) (Config, error) {
 		ReadTimeout:     r.duration("SERVER_READ_TIMEOUT", "server.read_timeout"),
 		WriteTimeout:    r.duration("SERVER_WRITE_TIMEOUT", "server.write_timeout"),
 		ShutdownTimeout: r.duration("SERVER_SHUTDOWN_TIMEOUT", "server.shutdown_timeout"),
+		MaxBodyBytes:    r.integer("SERVER_MAX_BODY_BYTES", "server.max_body_bytes"),
+		TrustedProxies:  r.list("SERVER_TRUSTED_PROXIES", "server.trusted_proxies"),
+		ProxyHeader:     r.optionalStr("SERVER_PROXY_HEADER", "server.proxy_header"),
 
 		DBHost:           r.str("DB_HOST", "db.host"),
 		DBPort:           r.port("DB_PORT", "db.port"),
@@ -122,6 +136,10 @@ func LoadFrom(configPath, envPath string) (Config, error) {
 		DBSSLMode:        r.str("DB_SSLMODE", "db.sslmode"),
 		DBConnectTimeout: r.duration("DB_CONNECT_TIMEOUT", "db.connect_timeout"),
 		DBCallTimeout:    r.duration("DB_CALL_TIMEOUT", "db.call_timeout"),
+		DBMaxConns:       r.integer("DB_MAX_CONNECTIONS", "db.max_connections"),
+		DBMinConns:       r.integer("DB_MIN_CONNECTIONS", "db.min_connections"),
+		DBMaxConnLife:    r.duration("DB_MAX_CONN_LIFETIME", "db.max_conn_lifetime"),
+		DBMaxConnIdle:    r.duration("DB_MAX_CONN_IDLE_TIME", "db.max_conn_idle_time"),
 
 		JWTSecret:          r.secret("JWT_SECRET"),
 		JWTTTL:             r.duration("JWT_TTL", "jwt.ttl"),
@@ -129,8 +147,9 @@ func LoadFrom(configPath, envPath string) (Config, error) {
 		JWTIssuer:          r.str("JWT_ISSUER", "jwt.issuer"),
 		JWTMinSecretLength: r.integer("JWT_MIN_SECRET_LENGTH", "jwt.min_secret_length"),
 
-		PasswordBcryptCost: r.integer("PASSWORD_BCRYPT_COST", "password.bcrypt_cost"),
-		PasswordMinLength:  r.integer("PASSWORD_MIN_LENGTH", "password.min_length"),
+		PasswordBcryptCost:    r.integer("PASSWORD_BCRYPT_COST", "password.bcrypt_cost"),
+		PasswordMinLength:     r.integer("PASSWORD_MIN_LENGTH", "password.min_length"),
+		PasswordMaxConcurrent: r.integer("PASSWORD_MAX_CONCURRENT_HASHES", "password.max_concurrent_hashes"),
 
 		UsernameMinLength: r.integer("USER_MIN_USERNAME_LENGTH", "user.min_username_length"),
 		UsernameMaxLength: r.integer("USER_MAX_USERNAME_LENGTH", "user.max_username_length"),
@@ -165,6 +184,7 @@ func LoadFrom(configPath, envPath string) (Config, error) {
 		MetricsEnabled:   r.boolean("METRICS_ENABLED", "observability.metrics_enabled"),
 		MetricsPath:      r.str("METRICS_PATH", "observability.metrics_path"),
 		MetricsNamespace: r.str("METRICS_NAMESPACE", "observability.metrics_namespace"),
+		MetricsAddress:   r.optionalStr("METRICS_ADDRESS", "observability.metrics_address"),
 	}
 
 	if err := r.err(configPath); err != nil {
@@ -265,6 +285,28 @@ func (r *resolver) str(envKey, yamlKey string) string {
 	}
 
 	return value
+}
+
+// optionalStr resolves a setting that may legitimately be empty.
+func (r *resolver) optionalStr(envKey, yamlKey string) string {
+	value, _ := r.lookup(envKey, yamlKey)
+	return value
+}
+
+// list splits a comma-separated setting; empty means an empty list.
+func (r *resolver) list(envKey, yamlKey string) []string {
+	value, ok := r.lookup(envKey, yamlKey)
+	if !ok {
+		return nil
+	}
+
+	var items []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			items = append(items, item)
+		}
+	}
+	return items
 }
 
 func (r *resolver) integer(envKey, yamlKey string) int {
@@ -461,6 +503,49 @@ func (c Config) validate() error {
 	validatePositiveInt("ratelimit.auth_max_requests", c.RateLimitAuthMaxRequests)
 	validatePositiveInt("pagination.default_page_size", c.DefaultPageSize)
 	validatePositiveInt("pagination.max_page_size", c.MaxPageSize)
+	validatePositiveInt("server.max_body_bytes", c.MaxBodyBytes)
+	validatePositiveInt("db.max_connections", c.DBMaxConns)
+	validatePositiveInt("password.max_concurrent_hashes", c.PasswordMaxConcurrent)
+	validatePositiveDuration("db.max_conn_lifetime", c.DBMaxConnLife)
+	validatePositiveDuration("db.max_conn_idle_time", c.DBMaxConnIdle)
+
+	if c.DBMinConns < 0 {
+		problems = append(problems, "db.min_connections must be zero or more")
+	}
+	if c.DBMinConns > c.DBMaxConns {
+		problems = append(problems, fmt.Sprintf(
+			"db.min_connections (%d) is above db.max_connections (%d)",
+			c.DBMinConns, c.DBMaxConns))
+	}
+	if c.DBMaxConnIdle > c.DBMaxConnLife {
+		problems = append(problems, fmt.Sprintf(
+			"db.max_conn_idle_time (%s) is above db.max_conn_lifetime (%s), so it can never take effect",
+			c.DBMaxConnIdle, c.DBMaxConnLife))
+	}
+
+	// A forwarding header is client-supplied. Believing it without naming who
+	// may set it lets anyone claim any address, which would hand every caller
+	// their own rate-limit budget.
+	if c.ProxyHeader != "" && len(c.TrustedProxies) == 0 {
+		problems = append(problems,
+			"server.proxy_header is set but server.trusted_proxies is empty: "+
+				"any client could then spoof its address")
+	}
+	for _, proxy := range c.TrustedProxies {
+		if net.ParseIP(proxy) == nil {
+			if _, _, err := net.ParseCIDR(proxy); err != nil {
+				problems = append(problems, fmt.Sprintf(
+					"server.trusted_proxies contains %q, which is neither an IP address nor a CIDR range", proxy))
+			}
+		}
+	}
+
+	if c.MetricsAddress != "" {
+		if _, _, err := net.SplitHostPort(c.MetricsAddress); err != nil {
+			problems = append(problems, fmt.Sprintf(
+				"observability.metrics_address is %q, which is not a host:port such as \":9101\"", c.MetricsAddress))
+		}
+	}
 
 	if len(c.JWTSecret) < c.JWTMinSecretLength {
 		problems = append(
@@ -479,6 +564,13 @@ func (c Config) validate() error {
 			problems,
 			"ADMIN_USERNAME and ADMIN_PASSWORD_HASH must both be set, or both left empty",
 		)
+	}
+
+	if c.AdminPasswordHash != "" {
+		if err := password.ValidHash(c.AdminPasswordHash); err != nil {
+			problems = append(problems, fmt.Sprintf(
+				"ADMIN_PASSWORD_HASH is not a bcrypt hash (%v); generate one with 'make gen-admin-hash'", err))
+		}
 	}
 
 	if c.PasswordMinLength > maxBcryptPasswordLength {
@@ -594,9 +686,6 @@ func (c Config) DatabaseDSN() string {
 	return u.String()
 }
 
-// ReadEnvFile reads literal KEY=value entries. Values are never expanded or
-// executed. Matching outer quotes are removed; their contents remain literal.
-// Empty lines and whole-line comments are ignored. Duplicate keys are errors.
 func ReadEnvFile(path string) (map[string]string, error) {
 	values := make(map[string]string)
 	data, err := os.ReadFile(path)
@@ -679,6 +768,9 @@ type fileConfig struct {
 		ReadTimeout     *string `yaml:"read_timeout"`
 		WriteTimeout    *string `yaml:"write_timeout"`
 		ShutdownTimeout *string `yaml:"shutdown_timeout"`
+		MaxBodyBytes    *int    `yaml:"max_body_bytes"`
+		TrustedProxies  *string `yaml:"trusted_proxies"`
+		ProxyHeader     *string `yaml:"proxy_header"`
 	} `yaml:"server"`
 	DB struct {
 		Host           *string `yaml:"host"`
@@ -688,6 +780,10 @@ type fileConfig struct {
 		SSLMode        *string `yaml:"sslmode"`
 		ConnectTimeout *string `yaml:"connect_timeout"`
 		CallTimeout    *string `yaml:"call_timeout"`
+		MaxConns       *int    `yaml:"max_connections"`
+		MinConns       *int    `yaml:"min_connections"`
+		MaxConnLife    *string `yaml:"max_conn_lifetime"`
+		MaxConnIdle    *string `yaml:"max_conn_idle_time"`
 	} `yaml:"db"`
 	JWT struct {
 		TTL             *string `yaml:"ttl"`
@@ -696,8 +792,9 @@ type fileConfig struct {
 		MinSecretLength *int    `yaml:"min_secret_length"`
 	} `yaml:"jwt"`
 	Password struct {
-		BcryptCost *int `yaml:"bcrypt_cost"`
-		MinLength  *int `yaml:"min_length"`
+		BcryptCost    *int `yaml:"bcrypt_cost"`
+		MinLength     *int `yaml:"min_length"`
+		MaxConcurrent *int `yaml:"max_concurrent_hashes"`
 	} `yaml:"password"`
 	User struct {
 		MinUsernameLength *int `yaml:"min_username_length"`
@@ -735,6 +832,7 @@ type fileConfig struct {
 		MetricsEnabled   *bool   `yaml:"metrics_enabled"`
 		MetricsPath      *string `yaml:"metrics_path"`
 		MetricsNamespace *string `yaml:"metrics_namespace"`
+		MetricsAddress   *string `yaml:"metrics_address"`
 	} `yaml:"observability"`
 	RunMigrations  *bool   `yaml:"run_migrations"`
 	MigrationsPath *string `yaml:"migrations_path"`

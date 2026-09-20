@@ -1,11 +1,16 @@
 package config
 
 import (
+	"context"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/bcrypt"
+
+	"to-do-list/internal/auth/password"
 )
 
 const completeYAML = `
@@ -18,6 +23,9 @@ server:
   read_timeout: 10s
   write_timeout: 10s
   shutdown_timeout: 15s
+  max_body_bytes: 1048576
+  trusted_proxies: ""
+  proxy_header: ""
 
 db:
   host: localhost
@@ -27,6 +35,10 @@ db:
   sslmode: disable
   connect_timeout: 5s
   call_timeout: 5s
+  max_connections: 10
+  min_connections: 2
+  max_conn_lifetime: 1h
+  max_conn_idle_time: 30m
 
 jwt:
   ttl: 1h
@@ -37,6 +49,7 @@ jwt:
 password:
   bcrypt_cost: 12
   min_length: 8
+  max_concurrent_hashes: 4
 
 user:
   min_username_length: 3
@@ -70,6 +83,7 @@ observability:
   metrics_enabled: true
   metrics_path: /metrics
   metrics_namespace: todo
+  metrics_address: ""
 
 log:
   level: info
@@ -228,6 +242,9 @@ func TestLoadFrom_MissingSettingIsReportedNotDefaulted(t *testing.T) {
   read_timeout: 10s
   write_timeout: 10s
   shutdown_timeout: 15s
+  max_body_bytes: 1048576
+  trusted_proxies: ""
+  proxy_header: ""
 `, "", 1)
 
 	configPath, envPath := writeConfig(t, yaml)
@@ -266,7 +283,7 @@ func TestLoadFrom_InvalidYAMLTypeReportsLocation(t *testing.T) {
 	if err == nil {
 		t.Fatal("LoadFrom() with a non-numeric db.port should return an error")
 	}
-	if !strings.Contains(err.Error(), "line 14") || !strings.Contains(err.Error(), "into int") {
+	if !strings.Contains(err.Error(), "line 17") || !strings.Contains(err.Error(), "into int") {
 		t.Errorf("error should identify the invalid YAML type and location, got: %v", err)
 	}
 }
@@ -602,9 +619,18 @@ func TestLoadFrom_OptionalSecretsComeFromDotEnv(t *testing.T) {
 		t.Fatalf("write temp config.yaml: %v", err)
 	}
 
+	hasher, err := password.NewHasher(bcrypt.MinCost, 1)
+	if err != nil {
+		t.Fatalf("NewHasher(): %v", err)
+	}
+	adminHash, err := hasher.Hash(context.Background(), "an-admin-password")
+	if err != nil {
+		t.Fatalf("Hash(): %v", err)
+	}
+
 	envPath := filepath.Join(dir, ".env")
 	dotenv := "DB_PASSWORD=s3cret\nJWT_SECRET=" + strings.Repeat("e", 32) +
-		"\nADMIN_USERNAME=root\nADMIN_PASSWORD_HASH=$2a$12$fakehashvalue\n"
+		"\nADMIN_USERNAME=root\nADMIN_PASSWORD_HASH=" + adminHash + "\n"
 	if err := os.WriteFile(envPath, []byte(dotenv), 0o600); err != nil {
 		t.Fatalf("write temp .env: %v", err)
 	}
@@ -702,5 +728,48 @@ func TestLoadFrom_RejectsUnusableMetricsSettings(t *testing.T) {
 				t.Errorf("error should name %s, got: %v", tc.key, err)
 			}
 		})
+	}
+}
+
+// A malformed admin hash rejects every admin login. Failing at startup names
+// the variable; failing at login time produces a 500 per attempt and no clue.
+func TestLoadFrom_RejectsAnAdminHashBcryptCannotRead(t *testing.T) {
+	setSecrets(t)
+	t.Setenv("ADMIN_USERNAME", "root")
+	t.Setenv("ADMIN_PASSWORD_HASH", "definitely-not-a-bcrypt-hash")
+
+	configPath, envPath := writeConfig(t, completeYAML)
+
+	_, err := LoadFrom(configPath, envPath)
+	if err == nil {
+		t.Fatal("LoadFrom() accepted an ADMIN_PASSWORD_HASH that is not a bcrypt hash")
+	}
+	if !strings.Contains(err.Error(), "ADMIN_PASSWORD_HASH") {
+		t.Errorf("error does not name the variable: %v", err)
+	}
+}
+
+func TestLoadFrom_AcceptsARealAdminHash(t *testing.T) {
+	setSecrets(t)
+
+	hasher, err := password.NewHasher(bcrypt.MinCost, 1)
+	if err != nil {
+		t.Fatalf("NewHasher(): %v", err)
+	}
+	hash, err := hasher.Hash(context.Background(), "an-admin-password")
+	if err != nil {
+		t.Fatalf("Hash(): %v", err)
+	}
+
+	t.Setenv("ADMIN_USERNAME", "root")
+	t.Setenv("ADMIN_PASSWORD_HASH", hash)
+
+	configPath, envPath := writeConfig(t, completeYAML)
+	cfg, err := LoadFrom(configPath, envPath)
+	if err != nil {
+		t.Fatalf("LoadFrom(): %v", err)
+	}
+	if cfg.AdminPasswordHash != hash {
+		t.Error("the admin hash did not survive loading")
 	}
 }

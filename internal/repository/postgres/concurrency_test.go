@@ -23,24 +23,20 @@ func testLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard,
 
 func testHasher(t *testing.T) *password.Hasher {
 	t.Helper()
-	h, err := password.NewHasher(bcrypt.MinCost)
+	h, err := password.NewHasher(bcrypt.MinCost, 2)
 	if err != nil {
 		t.Fatalf("password.NewHasher(): %v", err)
 	}
 	return h
 }
 
-// TestConcurrent_ProfileUpdateDoesNotLoseOtherFields is the regression test
-// for the lost update: one request changes the email while another changes
-// the password. Both reads happen before either write, which is exactly the
-// window two ordinary HTTP requests hit.
 func TestConcurrent_ProfileUpdateDoesNotLoseOtherFields(t *testing.T) {
 	pool := setupTestPool(t)
 	repo := NewUserRepository(pool)
 	ctx := context.Background()
 
 	hasher := testHasher(t)
-	oldHash, _ := hasher.Hash("original-password")
+	oldHash, _ := hasher.Hash(context.Background(), "original-password")
 	user, err := repo.Create(ctx, domain.User{Username: "alice", Email: "a@example.com", PasswordHash: oldHash})
 	if err != nil {
 		t.Fatalf("seed: %v", err)
@@ -52,7 +48,7 @@ func TestConcurrent_ProfileUpdateDoesNotLoseOtherFields(t *testing.T) {
 	}
 
 	// Request B changes the password in the meantime.
-	newHash, _ := hasher.Hash("new-password")
+	newHash, _ := hasher.Hash(context.Background(), "new-password")
 	if _, err := repo.Update(ctx, user.ID, domain.UserUpdate{PasswordHash: &newHash}); err != nil {
 		t.Fatalf("B update: %v", err)
 	}
@@ -70,7 +66,7 @@ func TestConcurrent_ProfileUpdateDoesNotLoseOtherFields(t *testing.T) {
 	if final.Email != newEmail {
 		t.Errorf("Email = %q, want %q", final.Email, newEmail)
 	}
-	if !password.Matches(final.PasswordHash, "new-password") {
+	if !hasherMatches(t, final.PasswordHash, "new-password") {
 		t.Error("the password change was overwritten by the email change")
 	}
 }
@@ -92,7 +88,7 @@ func TestConcurrent_ProfileUpdatesThroughUseCase(t *testing.T) {
 		MaxPageSize:       100,
 	}, testLogger())
 
-	oldHash, _ := hasher.Hash("original-password")
+	oldHash, _ := hasher.Hash(context.Background(), "original-password")
 	user, err := repo.Create(ctx, domain.User{Username: "alice", Email: "a@example.com", PasswordHash: oldHash})
 	if err != nil {
 		t.Fatalf("seed: %v", err)
@@ -127,7 +123,7 @@ func TestConcurrent_ProfileUpdatesThroughUseCase(t *testing.T) {
 	if final.Email != "changed@example.com" {
 		t.Errorf("Email = %q, want the concurrently written value", final.Email)
 	}
-	if !password.Matches(final.PasswordHash, "brand-new-password") {
+	if !hasherMatches(t, final.PasswordHash, "brand-new-password") {
 		t.Error("the concurrent password change was lost")
 	}
 }
@@ -142,14 +138,6 @@ func newTaskUseCaseForIntegration(repo usecase.TaskRepository) *usecase.TaskUseC
 	}, testLogger())
 }
 
-// TestConcurrent_TwoTogglesProduceTwoTransitions is the regression test for
-// the lost transition: two requests toggling at the same time must advance
-// the task twice, not once.
-//
-// Whether the two goroutines actually overlap is up to the scheduler, so the
-// pair is repeated: a single round can pass by luck, a whole run of them
-// cannot. TestCompareAndSetStatus_StaleFromIsConflict covers the same
-// guarantee deterministically at the SQL level.
 func TestConcurrent_TwoTogglesProduceTwoTransitions(t *testing.T) {
 	pool := setupTestPool(t)
 	user := seedUser(t, pool, "alice")
@@ -240,9 +228,6 @@ func TestConcurrent_ManyTogglesLandOnTheRightStatus(t *testing.T) {
 	}
 }
 
-// TestCompareAndSetStatus_ForeignTaskIsNotFound: the ownership check moved
-// into the UPDATE's WHERE clause, and a task belonging to someone else must
-// still be indistinguishable from a missing one.
 func TestCompareAndSetStatus_ForeignTaskIsNotFound(t *testing.T) {
 	pool := setupTestPool(t)
 	alice := seedUser(t, pool, "alice")
@@ -342,4 +327,19 @@ func TestUserUpdate_DuplicateUsernameIsConflict(t *testing.T) {
 	if _, err := repo.Update(ctx, other.ID, domain.UserUpdate{Username: &taken}); !errors.Is(err, apperr.ErrConflict) {
 		t.Errorf("error = %v, want apperr.ErrConflict", err)
 	}
+}
+
+func hasherMatches(t *testing.T, hash, plain string) bool {
+	t.Helper()
+
+	h, err := password.NewHasher(bcrypt.MinCost, 2)
+	if err != nil {
+		t.Fatalf("password.NewHasher(): %v", err)
+	}
+
+	err = h.Verify(context.Background(), hash, plain)
+	if err != nil && !errors.Is(err, password.ErrMismatch) {
+		t.Fatalf("Verify(): %v", err)
+	}
+	return err == nil
 }

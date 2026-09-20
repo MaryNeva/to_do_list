@@ -1,16 +1,27 @@
 name: CI
 
+# Runs on every branch, not only the default one: a check that only runs
+# after a merge cannot stop anything from being merged.
 on:
   push:
-    branches: [main, master]
+    branches: ["**"]
+    tags: ["v*"]
   pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   GO_VERSION: "1.24"
+  REDOCLY_VERSION: "2.53.3"
 
 jobs:
-  build:
-    name: Build and unit tests
+  lint:
+    name: Formatting, vet and static analysis
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,9 +31,31 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      # -mod=readonly is the whole point of this job: it fails if go.mod or
-      # go.sum would have to change to build the code, which is what a clone
-      # of this repository has to be able to do.
+      # This job reports, it never rewrites. A CI step that formats the code
+      # hides the fact that the commit was not formatted.
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt'd; run 'make fmt'"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet -mod=readonly ./...
+
+      # staticcheck catches what vet does not: unused results, impossible
+      # conditions, misuse of the standard library. The version is pinned
+      # because @latest tracks a module that already requires a newer Go
+      # toolchain than this project builds with, and because a linter that
+      # changes under you turns an unrelated push red.
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.6.1 ./...
+
+      # -mod=readonly is the point of this step: it fails if go.mod or go.sum
+      # would have to change to build the code, which is what a fresh clone
+      # has to be able to do.
       - name: Build with the checked-in module graph
         run: go build -mod=readonly ./...
 
@@ -31,20 +64,34 @@ jobs:
           go mod tidy
           git diff --exit-code go.mod go.sum
 
-      - name: gofmt
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "these files are not gofmt'd:"
-            echo "$unformatted"
-            exit 1
-          fi
+  test:
+    name: Unit tests (race detector)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: go vet
-        run: go vet -mod=readonly ./...
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
 
       - name: Unit tests
-        run: go test -mod=readonly -race -cover ./...
+        run: go test -mod=readonly -race -covermode=atomic -coverprofile=coverage.out ./...
+
+      # The percentage comes from the profile this run just produced, so it
+      # cannot drift away from what was actually executed.
+      - name: Coverage
+        run: |
+          go tool cover -func=coverage.out | tail -20
+          total="$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}')"
+          echo "### Unit-test coverage: **${total}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "(from this run, \`go test -race ./...\`)" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-profile
+          path: coverage.out
+          retention-days: 14
 
   integration:
     name: Postgres integration tests
@@ -55,6 +102,8 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
+          # A database of its own. The suite truncates every table between
+          # tests, so it must never be pointed at a working database.
           POSTGRES_DB: to_do_test
         ports: ["5432:5432"]
         options: >-
@@ -72,8 +121,29 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
+      # Without this, a service container that never came up would leave the
+      # suite skipping every test and the job reporting success.
+      - name: The database is actually there
+        run: |
+          pg_isready -h localhost -p 5432 -U postgres
+          psql "$TEST_DATABASE_URL" -c 'select 1' >/dev/null
+
       - name: Integration tests
-        run: go test -mod=readonly -race -tags=integration ./internal/repository/postgres/...
+        run: |
+          go test -mod=readonly -race -tags=integration -count=1 -v \
+            ./internal/repository/postgres/... 2>&1 | tee integration.log
+          exit "${PIPESTATUS[0]}"
+
+      # A skip here means the tests did not reach the database, which is the
+      # one outcome that looks identical to success in a summary line.
+      - name: Nothing was skipped
+        run: |
+          if grep -q '^--- SKIP' integration.log; then
+            echo "::error::integration tests were skipped; the job did not exercise Postgres"
+            grep '^--- SKIP' integration.log
+            exit 1
+          fi
+          grep -c '^--- PASS' integration.log
 
       - name: Migrations are reversible and upgrade existing data
         env:
@@ -101,20 +171,90 @@ jobs:
       # Two different checks, and both matter: the first says the document is
       # a valid OpenAPI 3 description, the second says the service actually
       # answers the way the document claims.
+      # Pinned: with @latest a new release of the linter turns an unrelated
+      # push red, and the rules the document is held to would change without
+      # a commit saying so.
       - name: The document is valid OpenAPI
-        run: npx --yes @redocly/cli@latest lint docs/openapi.yaml
+        run: npx --yes @redocly/cli@${{ env.REDOCLY_VERSION }} lint docs/openapi.yaml
 
       - name: Real responses match the document
-        run: go test -mod=readonly -count=1 ./internal/transport/httpserver/ -run TestOpenAPI
+        run: go test -mod=readonly -count=1 ./internal/transport/httpserver/ -run TestOpenAPI -v
 
-  docker:
-    name: Docker image builds from a clean checkout
+  vulncheck:
+    name: Known vulnerabilities
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # Builds from the repository alone, with no local files to fall back on:
-      # this is what catches a file that works on a developer's machine only
-      # because it was never committed.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # govulncheck reports only the advisories whose vulnerable symbols this
+      # code actually reaches, so a finding here is one worth acting on.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  delivery:
+    name: Docker build and smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Builds from the repository alone, with no local files to fall back
+      # on: this is what catches a file that works on a developer's machine
+      # only because it was never committed.
       - name: Build the image
         run: docker build -f deployments/Dockerfile -t to-do-list:ci .
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Throwaway credentials for a stack that exists for one job.
+      - name: Configure the stack
+        run: |
+          {
+            echo "DB_PASSWORD=$(openssl rand -hex 16)"
+            echo "JWT_SECRET=$(openssl rand -hex 32)"
+          } > .env
+
+      # Drives the real HTTP API against real Postgres and reads the rows
+      # back out of the database, so a route that answers 200 without writing
+      # anything still fails. The stack is deliberately left running: logs
+      # are only collectable while the containers exist.
+      - name: Smoke test
+        run: ./scripts/smoke-test.sh
+
+      # Before the teardown, and through the same .env loader the rest of the
+      # project uses - otherwise Compose stops at the first required
+      # variable, which is exactly when the logs are wanted.
+      - name: Collect stack logs
+        if: always()
+        run: |
+          mkdir -p ci-logs
+          go run ./cmd/envexec docker compose --env-file /dev/null logs --no-color --tail=500 \
+            > ci-logs/compose.log 2>&1 || true
+          go run ./cmd/envexec docker compose --env-file /dev/null ps -a \
+            > ci-logs/compose-ps.txt 2>&1 || true
+
+      - name: Upload stack logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-logs
+          path: ci-logs/
+          retention-days: 7
+
+      - name: Tear the stack down
+        if: always()
+        run: go run ./cmd/envexec docker compose --env-file /dev/null down -v || true
+
+  ci:
+    name: All checks passed
+    runs-on: ubuntu-latest
+    needs: [lint, test, integration, contract, vulncheck, delivery]
+    steps:
+      - run: echo "every job succeeded"

@@ -17,6 +17,7 @@
 deployments/grafana
 deployments/prometheus
 docker-compose.yml
+docker-compose.observability.yml
 Dockerfile
 .dockerignore
 
