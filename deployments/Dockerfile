@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.24-alpine AS build
+# The Go line, not a patch release: patches are where the standard library's
+# security fixes land, and a pinned one goes quietly stale. This must stay
+# the line CI verifies with govulncheck - deployments/toolchain_test.go fails
+# if the two drift apart.
+FROM golang:1.25-alpine AS build
 WORKDIR /src
 
 # Dependencies first, in their own layer: this step only re-runs when

@@ -765,7 +765,27 @@ Some deliberate choices in there:
   hard-coded in this README, because a number in a README is a number nobody
   re-measures.
 
+- **The Go line is tracked, never pinned to a patch.** Both the workflow and
+  `deployments/Dockerfile` name a minor version (`1.25`) and pick up its
+  newest patch on every run. Patch releases are where the standard library's
+  security fixes arrive, so an exact pin goes stale the day after it is
+  written - silently, because a pin never fails.
+  `deployments/toolchain_test.go` fails if the two drift apart or if either
+  starts pinning a patch: `govulncheck` runs under the toolchain the workflow
+  installs, never under the one the image is built with, so without that
+  check the shipped binary could sit a whole minor version behind a green
+  pipeline.
+
 Locally, `make ci` runs everything that needs neither Postgres nor docker.
+
+`make vulncheck` deserves one warning, because its failure mode looks like a
+bug in this repository and is not. `govulncheck` reports advisories against
+the standard library of **whichever toolchain runs it**, so an out-of-date
+local Go prints a long list of `Found in: crypto/tls@go1.25 / Fixed in:
+crypto/tls@go1.25.13` - findings no change here can fix. The fix is to update
+Go (`brew upgrade go`, or <https://go.dev/dl/>). Findings that name a module
+instead of the standard library are the ones this repository owns, and
+`go get <module>@<fixed version> && go mod tidy` is what answers those.
 
 ## Limits
 
