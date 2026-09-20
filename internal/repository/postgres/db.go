@@ -12,18 +12,32 @@ import (
 
 const uniqueViolationCode = "23505"
 
-func NewPool(ctx context.Context, dsn string, connectTimeout time.Duration) (*pgxpool.Pool, error) {
+type PoolConfig struct {
+	MaxConns       int32
+	MinConns       int32
+	MaxConnLife    time.Duration
+	MaxConnIdle    time.Duration
+	ConnectTimeout time.Duration
+}
+
+func NewPool(ctx context.Context, dsn string, poolCfg PoolConfig) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: parse dsn: %w", err)
 	}
+
+	cfg.MaxConns = poolCfg.MaxConns
+	cfg.MinConns = poolCfg.MinConns
+	cfg.MaxConnLifetime = poolCfg.MaxConnLife
+	cfg.MaxConnIdleTime = poolCfg.MaxConnIdle
+	cfg.ConnConfig.ConnectTimeout = poolCfg.ConnectTimeout
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: create pool: %w", err)
 	}
 
-	pingCtx, cancel := context.WithTimeout(ctx, connectTimeout)
+	pingCtx, cancel := context.WithTimeout(ctx, poolCfg.ConnectTimeout)
 	defer cancel()
 
 	if err := pool.Ping(pingCtx); err != nil {
