@@ -1,5 +1,7 @@
 # to-do-list
 
+[![CI](https://github.com/MaryNeva/to_do_list/actions/workflows/ci.yml/badge.svg)](https://github.com/MaryNeva/to_do_list/actions/workflows/ci.yml)
+
 A small task-management REST API written in Go: JWT authentication, tasks
 scoped to their owner, and profile management. Built with
 [Fiber](https://gofiber.io), [pgx](https://github.com/jackc/pgx) and
@@ -7,6 +9,10 @@ Postgres, following a straightforward layered (clean) architecture.
 
 See [Notable design decisions](#notable-design-decisions) for a rundown of
 the security and correctness choices behind the auth and ownership checks.
+
+> This repository is published for reading, not for reuse: it is
+> source-available under an all-rights-reserved [licence](LICENSE), not open
+> source.
 
 ## Features
 
@@ -826,7 +832,13 @@ a distributed system, but worth knowing about:
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+**Source-available, not open source.** Copyright (c) 2026 MaryNeva, all
+rights reserved - see [LICENSE](LICENSE).
+
+The code is here to be read: by employers, by colleagues, by anyone curious
+about how it is put together. It is not licensed for use, copying,
+modification or redistribution in any project. If you want to use any part of
+it, ask - [github.com/MaryNeva](https://github.com/MaryNeva).
 
 ## Application boundaries and configuration semantics
 
