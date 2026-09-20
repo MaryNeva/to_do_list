@@ -23,15 +23,18 @@ type Config struct {
 	AppName                  string
 	ReadTimeout              time.Duration
 	WriteTimeout             time.Duration
+	MaxBodyBytes             int
+	TrustedProxies           []string
+	ProxyHeader              string
 	CORSAllowOrigins         string
 	CORSAllowMethods         string
 	CORSAllowHeaders         string
 	RateLimitAuthMaxRequests int
 	RateLimitAuthWindow      time.Duration
-	// HealthReadyTimeout budgets each dependency probe behind GET /readyz.
-	HealthReadyTimeout time.Duration
-	MetricsEnabled     bool
-	MetricsPath        string
+	HealthReadyTimeout       time.Duration
+	MetricsEnabled           bool
+	MetricsPath              string
+	MetricsAddress           string
 }
 
 type Observability struct {
@@ -40,8 +43,8 @@ type Observability struct {
 	Build    buildinfo.Info
 }
 
-// New builds the application. Every request context derives from base, so
-// cancelling it stops in-flight work at shutdown.
+// New builds the application. Every request context derives from base, which
+// must outlive the signal that starts a shutdown: see Drain.
 func New(
 	base context.Context,
 	cfg Config,
@@ -53,10 +56,14 @@ func New(
 	checks ...httpapi.Check,
 ) *fiber.App {
 	app := fiber.New(fiber.Config{
-		AppName:      cfg.AppName,
-		ErrorHandler: httpapi.NewErrorHandler(logger),
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
+		AppName:                 cfg.AppName,
+		ErrorHandler:            httpapi.NewErrorHandler(logger),
+		ReadTimeout:             cfg.ReadTimeout,
+		WriteTimeout:            cfg.WriteTimeout,
+		BodyLimit:               cfg.MaxBodyBytes,
+		ProxyHeader:             cfg.ProxyHeader,
+		EnableTrustedProxyCheck: len(cfg.TrustedProxies) > 0,
+		TrustedProxies:          cfg.TrustedProxies,
 	})
 
 	app.Use(requestid.New())
@@ -79,9 +86,9 @@ func New(
 	})
 
 	app.Get("/healthz", httpapi.HealthHandler(obs.Build))
-	app.Get("/readyz", httpapi.ReadyHandler(cfg.HealthReadyTimeout, checks...))
+	app.Get("/readyz", httpapi.ReadyHandler(logger, cfg.HealthReadyTimeout, checks...))
 
-	if cfg.MetricsEnabled && obs.Exporter != nil {
+	if cfg.MetricsEnabled && obs.Exporter != nil && cfg.MetricsAddress == "" {
 		app.Get(cfg.MetricsPath, adaptor.HTTPHandler(obs.Exporter))
 	}
 

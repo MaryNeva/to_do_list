@@ -18,7 +18,8 @@ func (t RefreshToken) IsUsable(now time.Time) bool {
 }
 
 type RotateResult struct {
-	Issued   RefreshToken
-	UserID   int64
-	Username string
+	Issued          RefreshToken
+	UserID          int64
+	Username        string
+	SessionsRevoked int64
 }

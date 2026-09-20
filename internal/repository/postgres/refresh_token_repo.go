@@ -218,7 +218,18 @@ func (r *RefreshTokenRepository) Rotate(
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return domain.RotateResult{}, fmt.Errorf("postgres: scan consumed refresh token: %w", err)
 		}
-		return domain.RotateResult{UserID: ownerID, Username: owner.username}, r.classifyUnusable(ctx, tx, presentedHash)
+
+		revoked, reason := r.handleUnusable(ctx, tx, presentedHash, ownerID)
+		if errors.Is(reason, apperr.ErrTokenReuse) {
+			if err := tx.Commit(ctx); err != nil {
+				return domain.RotateResult{}, fmt.Errorf("postgres: commit revocation after refresh token reuse: %w", err)
+			}
+		}
+		return domain.RotateResult{
+			UserID:          ownerID,
+			Username:        owner.username,
+			SessionsRevoked: revoked,
+		}, reason
 	}
 
 	issuedRows, err := tx.Query(ctx, `INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
@@ -248,21 +259,27 @@ func (r *RefreshTokenRepository) Rotate(
 	}, nil
 }
 
-func (r *RefreshTokenRepository) classifyUnusable(ctx context.Context, tx pgx.Tx, hash string) error {
+func (r *RefreshTokenRepository) handleUnusable(ctx context.Context, tx pgx.Tx, hash string, ownerID int64) (int64, error) {
 	var revoked, expired bool
 	err := tx.QueryRow(ctx,
 		`SELECT revoked_at IS NOT NULL, expires_at <= clock_timestamp()
 		 FROM refresh_tokens WHERE token_hash = $1`, hash).Scan(&revoked, &expired)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return apperr.ErrNotFound
+		return 0, apperr.ErrNotFound
 	case err != nil:
-		return fmt.Errorf("postgres: inspect refresh token: %w", err)
-	case revoked:
-		return apperr.ErrConflict
-	case expired:
-		return fmt.Errorf("%w: refresh token expired", apperr.ErrUnauthorized)
-	default:
-		return fmt.Errorf("%w: refresh token is not usable", apperr.ErrUnauthorized)
+		return 0, fmt.Errorf("postgres: inspect refresh token: %w", err)
+	case !revoked && expired:
+		return 0, fmt.Errorf("%w: refresh token expired", apperr.ErrUnauthorized)
+	case !revoked:
+		return 0, fmt.Errorf("%w: refresh token is not usable", apperr.ErrUnauthorized)
 	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, ownerID)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: revoke sessions after refresh token reuse: %w", err)
+	}
+
+	return tag.RowsAffected(), apperr.ErrTokenReuse
 }

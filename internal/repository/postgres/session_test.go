@@ -4,6 +4,8 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"sync"
 	"testing"
@@ -36,11 +38,11 @@ func newSessionFixture(t *testing.T) sessionFixture {
 	users := NewUserRepository(pool)
 	refresh := NewRefreshTokenRepository(pool)
 
-	hasher, err := password.NewHasher(bcrypt.MinCost)
+	hasher, err := password.NewHasher(bcrypt.MinCost, 2)
 	if err != nil {
 		t.Fatalf("NewHasher(): %v", err)
 	}
-	hash, _ := hasher.Hash("s3cret-pass")
+	hash, _ := hasher.Hash(context.Background(), "s3cret-pass")
 	user, err := users.Create(context.Background(), domain.User{
 		Username: "alice", Email: "alice@example.com", PasswordHash: hash,
 	})
@@ -400,7 +402,7 @@ func TestPasswordChange_FailedUpdateKeepsSessions(t *testing.T) {
 	ctx := context.Background()
 	f.login(t)
 
-	taken, err := f.hasher.Hash("another-password")
+	taken, err := f.hasher.Hash(context.Background(), "another-password")
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
@@ -654,4 +656,81 @@ func TestLogin_WaitsForAnInFlightPasswordChange(t *testing.T) {
 	if active := f.activeSessions(t); active != 0 {
 		t.Errorf("%d sessions survived the password change, want 0", active)
 	}
+}
+
+// Replaying a consumed token is the one event that ends every session of the
+// account. Detecting it and acting on it are now one transaction under the
+// same lock on the user row: before, the use case made a second call, and if
+// that call failed the client still got the ordinary 401 while the other
+// sessions stayed alive.
+func TestRotate_ReplayEndsEverySessionInTheSameTransaction(t *testing.T) {
+	f := newSessionFixture(t)
+	ctx := context.Background()
+
+	// Three live sessions, one of which is about to be replayed.
+	replayed := f.login(t)
+	second := f.login(t)
+	third := f.login(t)
+
+	rotated, err := f.auth.Refresh(ctx, replayed.RefreshToken)
+	if err != nil {
+		t.Fatalf("first Refresh(): %v", err)
+	}
+
+	live := countLiveSessions(t, f.pool, f.user.ID)
+	if live != 3 {
+		t.Fatalf("%d live sessions before the replay, want 3", live)
+	}
+
+	// The same token again: a stolen copy, or a retry that lost the race.
+	result, err := f.refresh.Rotate(ctx, sha256Hex(replayed.RefreshToken), domain.RefreshToken{
+		TokenHash: "a-brand-new-hash",
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+
+	if !errors.Is(err, apperr.ErrTokenReuse) {
+		t.Fatalf("Rotate() on a replay = %v, want apperr.ErrTokenReuse", err)
+	}
+	if errors.Is(err, apperr.ErrConflict) {
+		t.Error("a replay must not be indistinguishable from a hash collision")
+	}
+	if result.UserID != f.user.ID {
+		t.Errorf("UserID = %d, want %d - the caller cannot report what it does not know", result.UserID, f.user.ID)
+	}
+	if result.SessionsRevoked != 3 {
+		t.Errorf("SessionsRevoked = %d, want 3", result.SessionsRevoked)
+	}
+
+	if live := countLiveSessions(t, f.pool, f.user.ID); live != 0 {
+		t.Errorf("%d sessions are still live after the replay, want 0", live)
+	}
+
+	// And every token that existed is now useless, including the one the
+	// first rotation had just issued.
+	for name, refreshToken := range map[string]string{
+		"the token issued by the rotation": rotated.RefreshToken,
+		"a second session":                 second.RefreshToken,
+		"a third session":                  third.RefreshToken,
+	} {
+		if _, err := f.auth.Refresh(ctx, refreshToken); err == nil {
+			t.Errorf("%s still works after the replay", name)
+		}
+	}
+}
+
+func countLiveSessions(t *testing.T, pool *pgxpool.Pool, userID int64) int {
+	t.Helper()
+
+	var live int
+	err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL`, userID).Scan(&live)
+	if err != nil {
+		t.Fatalf("count live sessions: %v", err)
+	}
+	return live
+}
+
+func sha256Hex(plain string) string {
+	sum := sha256.Sum256([]byte(plain))
+	return hex.EncodeToString(sum[:])
 }

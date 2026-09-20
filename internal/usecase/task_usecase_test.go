@@ -11,7 +11,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"to-do-list/internal/apperr"
+	"to-do-list/internal/auth/password"
 	"to-do-list/internal/domain"
 )
 
@@ -255,9 +258,6 @@ func TestTaskUseCase_Update_OwnershipEnforced(t *testing.T) {
 	}
 }
 
-// The three cases a partial update has to keep apart: a field that was not
-// sent, a field sent empty, and a field sent with something the task cannot
-// hold.
 func TestTaskUseCase_Update_PartialSemantics(t *testing.T) {
 	ctx := context.Background()
 	long := strings.Repeat("x", 201)
@@ -440,9 +440,6 @@ func TestTaskUseCase_List_ScopedToRequester(t *testing.T) {
 	}
 }
 
-// TestTaskUseCase_Create_CountsCharactersNotBytes pins the Unicode boundary
-// for task text: the limits are stated in characters, so a title of 200
-// Cyrillic letters (400 bytes) or 200 emoji (800 bytes) must be accepted.
 func TestTaskUseCase_Create_CountsCharactersNotBytes(t *testing.T) {
 	cfg := testTaskConfig()
 
@@ -485,9 +482,6 @@ func TestTaskUseCase_Create_CountsCharactersNotBytes(t *testing.T) {
 	}
 }
 
-// TestTaskUseCase_ToggleStatus_RetriesAfterConcurrentChange: when another
-// request moves the task first, the toggle must retry from the new status
-// instead of failing or skipping a transition.
 func TestTaskUseCase_ToggleStatus_RetriesAfterConcurrentChange(t *testing.T) {
 	repo := newFakeTaskRepo()
 	interfering := &interferingTaskRepo{fakeTaskRepo: repo}
@@ -495,9 +489,6 @@ func TestTaskUseCase_ToggleStatus_RetriesAfterConcurrentChange(t *testing.T) {
 
 	owned, _ := repo.Create(context.Background(), domain.Task{Title: "mine", CreatorID: 1, Status: domain.StatusCreated})
 
-	// The first compare-and-set is preceded by someone else moving the task
-	// created -> in_progress, so this call must land on in_progress ->
-	// completed rather than reporting a conflict.
 	interfering.before = func() {
 		task := repo.tasks[owned.ID]
 		task.Status = domain.StatusInProgress
@@ -632,4 +623,19 @@ func TestTaskUseCase_List_StaysScopedToRequesterWhenPaginated(t *testing.T) {
 			t.Errorf("page contains a task owned by %d", task.CreatorID)
 		}
 	}
+}
+
+func hasherMatches(t *testing.T, hash, plain string) bool {
+	t.Helper()
+
+	h, err := password.NewHasher(bcrypt.MinCost, 2)
+	if err != nil {
+		t.Fatalf("password.NewHasher(): %v", err)
+	}
+
+	err = h.Verify(context.Background(), hash, plain)
+	if err != nil && !errors.Is(err, password.ErrMismatch) {
+		t.Fatalf("Verify(): %v", err)
+	}
+	return err == nil
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/mail"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -82,13 +83,16 @@ func (uc *UserUseCase) Update(ctx context.Context, actor domain.Claims, id int64
 		fields.Username = &username
 	}
 	if email = strings.TrimSpace(email); email != "" {
+		if err := validateEmail(email); err != nil {
+			return domain.User{}, err
+		}
 		fields.Email = &email
 	}
 	if newPassword != "" {
 		if err := validatePassword(newPassword, uc.cfg.MinPasswordLength); err != nil {
 			return domain.User{}, err
 		}
-		hash, err := uc.hasher.Hash(newPassword)
+		hash, err := uc.hasher.Hash(ctx, newPassword)
 		if err != nil {
 			return domain.User{}, fmt.Errorf("hash password: %w", err)
 		}
@@ -160,6 +164,23 @@ func validateUsername(username string, min, max int) error {
 	default:
 		return nil
 	}
+}
+
+const maxEmailLength = 320
+
+func validateEmail(email string) error {
+	if email == "" {
+		return fmt.Errorf("%w: email is required", apperr.ErrValidation)
+	}
+	if utf8.RuneCountInString(email) > maxEmailLength {
+		return fmt.Errorf("%w: email must be at most %d characters", apperr.ErrValidation, maxEmailLength)
+	}
+
+	parsed, err := mail.ParseAddress(email)
+	if err != nil || parsed.Address != email {
+		return fmt.Errorf("%w: %q is not a valid email address", apperr.ErrValidation, email)
+	}
+	return nil
 }
 
 func validatePassword(plain string, min int) error {
