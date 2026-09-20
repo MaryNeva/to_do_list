@@ -1,6 +1,6 @@
 # to-do-list
 
-[![CI](https://github.com/MaryNeva/to_do_list/actions/workflows/ci.yml/badge.svg)](https://github.com/MaryNeva/to_do_list/actions/workflows/ci.yml)
+[![CI](https://github.com/MaryNeva/to_do_list/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/MaryNeva/to_do_list/actions/workflows/ci.yml)
 
 A small task-management REST API written in Go: JWT authentication, tasks
 scoped to their owner, and profile management. Built with
