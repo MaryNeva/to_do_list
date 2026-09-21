@@ -1,6 +1,4 @@
-# Scrape configuration for the compose stack. The service is reached by its
-# compose service name, so this file works unchanged whatever host port
-# docker-compose.yml publishes.
+# Scrape config for the Compose stack; targets use service names, not host ports.
 
 global:
   scrape_interval: 15s
@@ -12,14 +10,12 @@ scrape_configs:
   - job_name: to-do-list
     metrics_path: /metrics
     static_configs:
-      # The metrics listener (METRICS_ADDRESS in docker-compose.yml), not the
-      # published API port: /metrics is not served there.
+      # METRICS_ADDRESS in docker-compose.yml; /metrics is not on the API port.
       - targets: ["app:9101"]
         labels:
           service: to-do-list
 
-  # Prometheus scraping itself: useful to tell "the service is down" from
-  # "the scraper is down" when a dashboard goes empty.
+  # Self-scrape, to tell a down service from a down scraper.
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]

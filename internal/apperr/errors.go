@@ -3,35 +3,29 @@ package apperr
 import "errors"
 
 var (
-	// ErrNotFound means the requested resource does not exist, or the
-	// caller is not allowed to know that it exists (e.g. another user's
-	// task) - both cases are deliberately indistinguishable to the client.
+	// ErrNotFound means the resource does not exist or belongs to someone
+	// else; clients cannot tell the two apart.
 	ErrNotFound = errors.New("resource not found")
 
-	// ErrConflict means the operation would violate a uniqueness
-	// constraint (duplicate username/email, ...).
+	// ErrConflict means the operation conflicts with stored state: a
+	// duplicate or reserved username/email, or a concurrent change.
 	ErrConflict = errors.New("resource already exists")
 
-	// ErrInvalidCredentials means a login attempt failed. It is
-	// intentionally generic so responses never reveal whether the
+	// ErrInvalidCredentials means a failed login. It does not say whether the
 	// username or the password was wrong.
 	ErrInvalidCredentials = errors.New("invalid username or password")
 
-	// ErrUnauthorized means the request has no (or an invalid/expired)
-	// authentication token.
+	// ErrUnauthorized means a missing, invalid or expired access or refresh token.
 	ErrUnauthorized = errors.New("unauthorized")
 
-	// ErrForbidden means the caller is authenticated but not allowed to
-	// perform the requested action on the resource.
+	// ErrForbidden means the caller is authenticated but not allowed to act.
 	ErrForbidden = errors.New("forbidden")
 
-	// ErrTokenReuse means a refresh token that had already been consumed was
-	// presented again. It is deliberately not ErrConflict: that one also
-	// covers a newly generated token colliding with a stored hash, which is
-	// a generator problem and must not be answered by ending every session
-	// the account has.
+	// ErrTokenReuse means an already revoked refresh token was presented. It is
+	// separate from ErrConflict, which also covers a generated-hash collision
+	// that must not revoke the user's sessions.
 	ErrTokenReuse = errors.New("refresh token was already used")
 
-	// ErrValidation means the caller supplied malformed input.
+	// ErrValidation means invalid input.
 	ErrValidation = errors.New("validation failed")
 )

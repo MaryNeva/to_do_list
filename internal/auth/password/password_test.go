@@ -101,8 +101,7 @@ func TestMatches(t *testing.T) {
 	if err := h.Verify(context.Background(), hash, "not-the-password"); !errors.Is(err, ErrMismatch) {
 		t.Errorf("Verify() with the wrong password = %v, want ErrMismatch", err)
 	}
-	// A hash bcrypt cannot read is not a wrong password; see
-	// TestHasher_Verify_SeparatesAWrongPasswordFromABrokenHash.
+	// An unreadable hash is an error, but not ErrMismatch.
 	err = h.Verify(context.Background(), "not-a-bcrypt-hash", "anything")
 	if err == nil {
 		t.Error("Verify() accepted a malformed hash")
@@ -145,8 +144,6 @@ func TestHash_ProducesDifferentSaltsEachTime(t *testing.T) {
 	}
 }
 
-// bcrypt is meant to be slow, so without a ceiling enough simultaneous
-// logins would take the whole CPU and starve every other request.
 func TestHasher_AllowsNoMoreThanTheConfiguredNumberOfSlots(t *testing.T) {
 	const limit = 2
 
@@ -170,8 +167,6 @@ func TestHasher_AllowsNoMoreThanTheConfiguredNumberOfSlots(t *testing.T) {
 		t.Fatalf("acquiring slot %d = %v, want it to wait and then time out", limit+1, err)
 	}
 
-	// A finished hash must hand its slot back, or the hasher would wedge
-	// itself after the first burst.
 	releases[0]()
 
 	freed, cancelFreed := context.WithTimeout(context.Background(), time.Second)
@@ -187,8 +182,6 @@ func TestHasher_AllowsNoMoreThanTheConfiguredNumberOfSlots(t *testing.T) {
 	}
 }
 
-// A caller that never got into the queue has not presented a wrong password,
-// and login must not report it as one.
 func TestHasher_QueueTimeoutIsNotAMismatch(t *testing.T) {
 	h, err := NewHasher(bcrypt.MinCost, 1)
 	if err != nil {
@@ -217,7 +210,6 @@ func TestHasher_QueueTimeoutIsNotAMismatch(t *testing.T) {
 	}
 }
 
-// Every hash returns its slot, so a hasher stays usable after a burst.
 func TestHasher_ReleasesSlotsAfterEveryCall(t *testing.T) {
 	h, err := NewHasher(bcrypt.MinCost, 1)
 	if err != nil {
@@ -241,9 +233,6 @@ func TestHasher_ReleasesSlotsAfterEveryCall(t *testing.T) {
 	}
 }
 
-// A wrong password and a hash bcrypt cannot read are different events: one
-// is a user typing badly, the other is a corrupted row or a mis-set
-// ADMIN_PASSWORD_HASH. Only the first may become a 401.
 func TestHasher_Verify_SeparatesAWrongPasswordFromABrokenHash(t *testing.T) {
 	h := testHasher(t)
 
@@ -263,9 +252,7 @@ func TestHasher_Verify_SeparatesAWrongPasswordFromABrokenHash(t *testing.T) {
 		{name: "empty stored hash", hash: "", plain: "anything"},
 		{name: "not bcrypt at all", hash: "not-a-bcrypt-hash", plain: "anything"},
 		{name: "truncated hash", hash: good[:len(good)-5], plain: "correct horse battery staple"},
-		// Go's bcrypt takes any byte as the minor version, so "$2z$" still
-		// parses; an unsupported major version and an out-of-range cost are
-		// the shapes it actually refuses.
+		// Go's bcrypt accepts any minor version byte ("$2z$"), so use hashes it rejects.
 		{name: "unsupported bcrypt version", hash: "$3a$12$" + good[7:], plain: "correct horse battery staple"},
 		{name: "cost outside the allowed range", hash: "$2a$99$" + good[7:], plain: "correct horse battery staple"},
 	} {

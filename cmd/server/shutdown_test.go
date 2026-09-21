@@ -13,8 +13,7 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError + 1}))
 }
 
-// listener stands in for one of the two serving goroutines: it reports once
-// on its channel, either straight away or only once the drain asks it to.
+// listener stands in for a serving goroutine that reports once on its channel.
 type listener struct {
 	ch chan error
 }
@@ -25,9 +24,6 @@ func (l *listener) fail(err error) { l.ch <- err }
 
 func (l *listener) stopsWhenDrained() { l.ch <- nil }
 
-// The case the reviewer found. The metrics listener dies; the API server is
-// still accepting and its requests are still holding pool connections. Every
-// exit has to drain, not just the one a signal triggers.
 func TestAwaitStop_DrainsEvenWhenTheExitIsAFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -53,8 +49,7 @@ func TestAwaitStop_DrainsEvenWhenTheExitIsAFailure(t *testing.T) {
 			drained := make(chan struct{})
 			drain := func() error {
 				close(drained)
-				// Whatever is still serving stops because the drain stopped
-				// it, which is the behaviour under test.
+				// Listeners still running stop only because of the drain.
 				select {
 				case api.ch <- nil:
 				default:
@@ -85,8 +80,6 @@ func TestAwaitStop_DrainsEvenWhenTheExitIsAFailure(t *testing.T) {
 	}
 }
 
-// The ordinary path, and the one that must not deadlock: both goroutines are
-// still running when the signal arrives, and both are waited for afterwards.
 func TestAwaitStop_WaitsForBothListenersAfterASignal(t *testing.T) {
 	api, metrics := newListener(), newListener()
 	signal := make(chan struct{})
@@ -105,8 +98,7 @@ func TestAwaitStop_WaitsForBothListenersAfterASignal(t *testing.T) {
 	}
 }
 
-// A deployment that serves metrics on the API port has no second goroutine.
-// Waiting for one would hang the shutdown forever.
+// Without a separate metrics listener there is nothing to wait for on that channel.
 func TestAwaitStop_DoesNotWaitForAMetricsListenerThatWasNeverStarted(t *testing.T) {
 	api := newListener()
 	signal := make(chan struct{})
@@ -124,8 +116,6 @@ func TestAwaitStop_DoesNotWaitForAMetricsListenerThatWasNeverStarted(t *testing.
 	}
 }
 
-// Work that outlived the grace period is reported, so a deployment can see
-// that its grace period is too short.
 func TestAwaitStop_ReportsWorkThatOutlivedTheGracePeriod(t *testing.T) {
 	api := newListener()
 	signal := make(chan struct{})
@@ -144,8 +134,6 @@ func TestAwaitStop_ReportsWorkThatOutlivedTheGracePeriod(t *testing.T) {
 	}
 }
 
-// When both went wrong, the failure that started the shutdown is the answer:
-// a drain that then ran out of time is a consequence of it, not the cause.
 func TestAwaitStop_PrefersTheFailureThatStartedTheShutdown(t *testing.T) {
 	api, metrics := newListener(), newListener()
 	api.fail(errors.New("address already in use"))
@@ -166,9 +154,7 @@ func TestAwaitStop_PrefersTheFailureThatStartedTheShutdown(t *testing.T) {
 	}
 }
 
-// A shutdown that hangs is the failure mode these branches are prone to, so
-// every case is given a deadline rather than being left to time the suite
-// out with no indication of which wait never returned.
+// awaitStopWithin fails the test instead of hanging when awaitStop never returns.
 func awaitStopWithin(t *testing.T, stops stopSignals, drain func() error) error {
 	t.Helper()
 

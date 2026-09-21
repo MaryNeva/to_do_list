@@ -7,8 +7,7 @@ import (
 	"github.com/go-playground/validator/v10"
 )
 
-// newValidator reports a field by its JSON name, so an error body names what
-// the client actually sent rather than the Go struct field.
+// newValidator reports fields by their JSON names, not Go field names.
 func newValidator() *validator.Validate {
 	v := validator.New()
 	v.RegisterTagNameFunc(func(field reflect.StructField) string {

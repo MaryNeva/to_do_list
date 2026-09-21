@@ -155,8 +155,8 @@ func (a *AuthUseCase) login(ctx context.Context, username, plainPassword string)
 		return domain.Tokens{}, domain.User{}, fmt.Errorf("get user: %w", err)
 	}
 
-	// Anything other than a mismatch means the comparison never ran - most
-	// likely the hashing queue is full - and must not read as a bad password.
+	// Only a mismatch is a wrong password. Other errors (unusable stored hash,
+	// timeout waiting for a hashing slot) are internal failures.
 	if err := a.hasher.Verify(ctx, user.PasswordHash, plainPassword); err != nil {
 		if errors.Is(err, password.ErrMismatch) {
 			return domain.Tokens{}, domain.User{}, apperr.ErrInvalidCredentials

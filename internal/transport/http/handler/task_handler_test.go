@@ -195,8 +195,6 @@ func TestTaskHandler_Delete_NoContent(t *testing.T) {
 	}
 }
 
-// The transport is the only place that can tell "not sent" from "sent
-// empty": once it hands the use case a string, the difference is gone.
 func TestTaskHandler_Update_SeparatesAbsentFromEmpty(t *testing.T) {
 	for _, tc := range []struct {
 		name            string

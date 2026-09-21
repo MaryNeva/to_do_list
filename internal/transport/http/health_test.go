@@ -108,8 +108,6 @@ func TestReadyHandler_ReportsEveryDependencySeparately(t *testing.T) {
 	}
 }
 
-// An unready instance has to say which dependency is at fault; a bare 503
-// leaves whoever is paged guessing.
 func TestReadyHandler_NamesTheFailingDependency(t *testing.T) {
 	failing := func(context.Context) error { return errors.New("connection refused") }
 
@@ -170,8 +168,8 @@ func TestReadyHandler_StopsAProbeThatOverrunsItsBudget(t *testing.T) {
 	}
 }
 
-// A probe's error names the host, port, database and user it could not
-// reach. /readyz needs no credentials, so that belongs in the log only.
+// /readyz is unauthenticated, so probe errors (which name hosts, databases
+// and users) must appear only in the log.
 func TestReadyHandler_KeepsTheReasonOutOfTheResponse(t *testing.T) {
 	leak := "failed to connect to `user=todo_user database=to_do_prod`: " +
 		"db.internal.example:5432: connection refused"
@@ -201,7 +199,6 @@ func TestReadyHandler_KeepsTheReasonOutOfTheResponse(t *testing.T) {
 		t.Errorf("the response does not name the failing check: %s", raw)
 	}
 
-	// The operator still needs the reason, so it has to be in the log.
 	if !strings.Contains(logs.String(), "db.internal.example") {
 		t.Errorf("the reason reached neither the client nor the log: %s", logs.String())
 	}

@@ -358,9 +358,6 @@ func TestUserUseCase_Update_CountsCharactersNotBytes(t *testing.T) {
 	}
 }
 
-// The DTO tag stops a malformed address at the HTTP edge. This is the same
-// rule one layer in, where it also applies to a caller that never went
-// through HTTP.
 func TestUseCases_RejectAMalformedEmailWithoutHelpFromTheTransport(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

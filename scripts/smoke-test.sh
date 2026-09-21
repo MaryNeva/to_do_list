@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end smoke test: brings up the docker compose stack (Postgres +
-# migrations + the API), then drives the real HTTP API to check that
-# registration, login and task CRUD actually persist to the database.
+# End-to-end smoke test: starts the Compose stack and checks through the HTTP
+# API and psql that registration, login, sessions and task CRUD persist.
 #
 # Usage:
 #   scripts/smoke-test.sh            # start the stack if needed, then verify
@@ -9,8 +8,7 @@
 #   scripts/smoke-test.sh --no-up    # skip `docker compose up`, just verify
 #                                     # against whatever is already running
 #
-# Requires: Go 1.24+, docker compose, curl, python3 (used for JSON parsing so the
-# script doesn't depend on jq being installed).
+# Requires: Go 1.25+, docker compose, curl, python3 (JSON parsing without jq).
 
 set -euo pipefail
 
@@ -36,7 +34,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
 	exit 1
 fi
 
-# Load once with the same literal parser as the application; never source secrets.
+# Re-exec once under envexec: .env is parsed like the service does, never sourced.
 if [[ "${TODO_ENV_LOADED:-}" != "1" ]]; then
  cd "$ROOT_DIR"
  exec go run ./cmd/envexec env TODO_ENV_LOADED=1 bash "$ROOT_DIR/scripts/smoke-test.sh" "$@"
@@ -48,9 +46,7 @@ DB_USER="${DB_USER:-postgres}"
 DB_NAME="${DB_NAME:-to_do}"
 BASE_URL="http://localhost:${SERVER_PORT}"
 
-# Every response body lands in a private directory that goes away with the
-# run. Fixed paths under /tmp would leave bearer tokens readable by anyone on
-# the machine and make two runs of this script overwrite each other's files.
+# Private per-run directory: responses contain bearer tokens.
 WORK_DIR="$(mktemp -d)"
 
 PASS=0
@@ -72,7 +68,7 @@ step() {
 }
 
 json_get() {
-	# json_get '<json>' 'key' - tiny helper so the script doesn't need jq.
+	# json_get '<json>' 'a.b' prints the value at that path.
 	python3 -c '
 import json, sys
 data = json.loads(sys.argv[1])
@@ -277,8 +273,7 @@ else
 	fail "update returned HTTP ${update_status}: $(cat "$WORK_DIR/update.json" 2>/dev/null)"
 fi
 
-# The response echoing the new title is not proof it was stored: read it back
-# and check the row itself.
+# Verify the stored row, not just the response.
 reread_status=$(curl -fsS -o "$WORK_DIR/reread.json" -w '%{http_code}' \
 	"${BASE_URL}/api/v1/tasks/${TASK_ID}" -H "Authorization: Bearer ${TOKEN}") || true
 db_title="$(compose exec -T db psql -U "$DB_USER" -d "$DB_NAME" -tA -c \
@@ -292,8 +287,6 @@ else
 fi
 
 step "A PATCH that sends only a title leaves the description alone"
-# The bug this guards: a title-only edit used to blank the description,
-# because the request struct always carried one.
 kept_status=$(curl -fsS -o "$WORK_DIR/partial.json" -w '%{http_code}' \
 	-X PATCH "${BASE_URL}/api/v1/tasks/${TASK_ID}" \
 	-H "Authorization: Bearer ${TOKEN}" \
@@ -334,8 +327,6 @@ else
 fi
 
 step "Setting a status through PATCH is safe to repeat"
-# Whatever a retry after a lost response would do, it must not move the task
-# a second time - which is exactly what toggle-status would do.
 for attempt in 1 2; do
 	set_status=$(curl -fsS -o "$WORK_DIR/set-status.json" -w '%{http_code}' \
 		-X PATCH "${BASE_URL}/api/v1/tasks/${TASK_ID}" \
@@ -359,7 +350,7 @@ step "Toggling task status via POST /api/v1/tasks/${TASK_ID}/toggle-status"
 toggle_status=$(curl -fsS -o "$WORK_DIR/toggle.json" -w '%{http_code}' \
 	-X POST "${BASE_URL}/api/v1/tasks/${TASK_ID}/toggle-status" \
 	-H "Authorization: Bearer ${TOKEN}") || true
-# The task was left completed by the step above, and the cycle wraps round.
+# The previous step left it completed; the cycle wraps to created.
 if [[ "$toggle_status" == "200" ]] && grep -q '"status":"created"' "$WORK_DIR/toggle.json"; then
 	pass "status moved completed -> created"
 else
@@ -388,10 +379,8 @@ else
 fi
 
 step "Ending a session (POST /api/v1/auth/logout)"
-# A fresh login, deliberately: the session opened at the start of this run was
-# already destroyed by the reuse-detection check above, which revokes every
-# session the account has. Reusing it here would let a completely broken
-# logout still produce 204 followed by 401, and the check would prove nothing.
+# Use a fresh session: the reuse check above revoked all earlier ones, so a
+# 401 from them would not prove that logout works.
 logout_login_status=$(curl -fsS -o "$WORK_DIR/logout-login.json" -w '%{http_code}' \
 	-X POST "${BASE_URL}/api/v1/auth/login" \
 	-H 'Content-Type: application/json' \
@@ -401,8 +390,7 @@ if [[ "$logout_login_status" != "200" ]]; then
 else
 	LOGOUT_REFRESH="$(json_get "$(cat "$WORK_DIR/logout-login.json")" refresh_token)"
 
-	# The session has to be usable before logout, otherwise the 401 afterwards
-	# says nothing about whether logout did anything.
+	# Confirm the session works before logging out.
 	before_logout=$(curl -s -o "$WORK_DIR/before-logout.json" -w '%{http_code}' \
 		-X POST "${BASE_URL}/api/v1/auth/refresh" \
 		-H 'Content-Type: application/json' \

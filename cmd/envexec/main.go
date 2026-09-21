@@ -1,4 +1,4 @@
-// envexec runs development tools with the service's literal .env semantics.
+// Command envexec runs a command with .env loaded the same way the service loads it.
 package main
 
 import (

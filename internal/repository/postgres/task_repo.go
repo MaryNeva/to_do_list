@@ -140,9 +140,8 @@ func orderClause(filter domain.TaskFilter) string {
 	return column + " " + direction + ", id " + direction
 }
 
-// Update writes only the fields the caller sent, and checks ownership in the
-// same statement. Nothing is read first, so two clients editing different
-// fields of one task both keep their change.
+// Update writes only non-nil fields and checks ownership in the same
+// statement, so concurrent edits of different fields do not overwrite each other.
 func (r *TaskRepository) Update(ctx context.Context, id, ownerID int64, update domain.TaskUpdate) (domain.Task, error) {
 	var status *string
 	if update.Status != nil {

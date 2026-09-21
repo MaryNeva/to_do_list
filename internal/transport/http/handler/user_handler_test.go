@@ -259,8 +259,6 @@ func TestUserHandler_Update_TellsAnAbsentFieldFromAnEmptyOne(t *testing.T) {
 	}
 }
 
-// An edit the use case refuses - nothing to change, or a field present and
-// empty - has to reach the caller as a 400, not as a 500.
 func TestUserHandler_Update_ReportsARefusedEditAsABadRequest(t *testing.T) {
 	svc := fakeUserService{
 		updateFn: func(context.Context, domain.Claims, int64, domain.UserEdit) (domain.User, error) {

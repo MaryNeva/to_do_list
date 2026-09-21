@@ -348,7 +348,7 @@ func TestAuthUseCase_ReuseCountsEverySessionItEnded(t *testing.T) {
 		t.Fatal("replaying a consumed token should fail")
 	}
 
-	// Two untouched sessions plus the replacement the first refresh issued.
+	// Two other sessions plus the token issued by the first refresh.
 	if got := metrics.count(metrics.revoked, ReasonTokenReuse); got != 3 {
 		t.Errorf("sessions revoked on reuse = %d, want 3", got)
 	}
@@ -357,10 +357,8 @@ func TestAuthUseCase_ReuseCountsEverySessionItEnded(t *testing.T) {
 	}
 }
 
-// The revocation is part of the transaction that detects the replay, so it
-// cannot half-happen. If it fails, the whole rotation fails: the caller gets
-// an error rather than the ordinary 401 that would mean "handled", and
-// nothing is reported as revoked.
+// If revoking sessions after a replay fails, Refresh returns an internal error
+// (not 401) and records no revocations.
 func TestAuthUseCase_AReplayWhoseRevocationFailsIsNotReportedAsHandled(t *testing.T) {
 	metrics := newFakeMetrics()
 	uc, _, _, refresh := newAuthUseCaseWithRefresh(t, "", "", WithMetrics(metrics))
@@ -383,7 +381,6 @@ func TestAuthUseCase_AReplayWhoseRevocationFailsIsNotReportedAsHandled(t *testin
 	if err == nil {
 		t.Fatal("replaying a consumed token should fail")
 	}
-	// 401 is what a handled replay looks like; this one was not handled.
 	if errors.Is(err, apperr.ErrUnauthorized) {
 		t.Errorf("error = %v, want an internal failure rather than the ordinary rejection", err)
 	}

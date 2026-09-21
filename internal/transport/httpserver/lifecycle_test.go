@@ -18,8 +18,7 @@ import (
 	"to-do-list/internal/transport/http/handler"
 )
 
-// slowUsers answers after work that takes a while, and records whether its
-// context was cancelled while it was working.
+// slowUsers.Get takes u.work to finish and reports its context error on seen.
 type slowUsers struct {
 	stubUsers
 	entered chan struct{}
@@ -102,10 +101,6 @@ func getUser(base string) (*http.Response, error) {
 	return http.DefaultClient.Do(req)
 }
 
-// This is the whole difference between a graceful shutdown and a kill: a
-// request that was already running when the signal arrived gets to finish.
-// It used to be cancelled, because request contexts hung off the same
-// context that signal.NotifyContext cancels.
 func TestDrain_LetsAnInFlightRequestFinish(t *testing.T) {
 	requestCtx, abandonInFlight := context.WithCancel(context.Background())
 	defer abandonInFlight()
@@ -135,7 +130,7 @@ func TestDrain_LetsAnInFlightRequestFinish(t *testing.T) {
 		t.Fatal("the request never reached the service")
 	}
 
-	// The signal arrives here, with the request half-done.
+	// Shut down while the request is in flight.
 	if err := Drain(5*time.Second, abandonInFlight, app, nil); err != nil {
 		t.Fatalf("Drain(): %v", err)
 	}
@@ -162,8 +157,6 @@ func TestDrain_LetsAnInFlightRequestFinish(t *testing.T) {
 	}
 }
 
-// The grace period is a bound, not a promise: work still running when it
-// expires is cancelled rather than waited on for ever.
 func TestDrain_CancelsWorkThatOutlivesTheGracePeriod(t *testing.T) {
 	requestCtx, abandonInFlight := context.WithCancel(context.Background())
 	defer abandonInFlight()
@@ -204,8 +197,6 @@ func TestDrain_CancelsWorkThatOutlivesTheGracePeriod(t *testing.T) {
 	}
 }
 
-// Before, the metrics listener was drained first and out of the same budget,
-// so a slow scrape could spend the time the API needed.
 func TestDrain_GivesEveryServerTheSameBudgetAtTheSameTime(t *testing.T) {
 	requestCtx, abandonInFlight := context.WithCancel(context.Background())
 	defer abandonInFlight()
@@ -239,7 +230,7 @@ func TestDrain_GivesEveryServerTheSameBudgetAtTheSameTime(t *testing.T) {
 		t.Fatal("the request never reached the service")
 	}
 
-	// One budget, spent once: two sequential drains would take twice this.
+	// Sequential drains would take about twice this long.
 	const grace = 400 * time.Millisecond
 	start := time.Now()
 	_ = Drain(grace, abandonInFlight, app, metrics)
@@ -265,8 +256,6 @@ func TestNewMetricsServer_RefusesAPortAlreadyInUse(t *testing.T) {
 
 	exporter := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
 
-	// A failure reported later, from a goroutine, would leave a service that
-	// passes every health check and exports nothing.
 	if _, err := NewMetricsServer(busy.Addr().String(), "/metrics", exporter); err == nil {
 		t.Fatal("NewMetricsServer() accepted a port that is already in use")
 	}

@@ -189,9 +189,7 @@ func (s *openAPI) validate(t *testing.T, where string, schema map[string]any, va
 	resolved := s.resolve(t, schema)
 	props, required, kind := s.flatten(t, resolved)
 
-	// null is a value like any other, and the document has to allow it. A
-	// checker that skips nil here cannot tell a property the document marks
-	// nullable from one the service forgot to fill in.
+	// null is accepted only where the schema is nullable.
 	if value == nil {
 		if nullable, _ := resolved["nullable"].(bool); nullable {
 			return nil
@@ -275,8 +273,7 @@ func (s *openAPI) validateScalar(where string, schema map[string]any, value any)
 		if !ok {
 			return []string{fmt.Sprintf("%s: the document says %s, the service sent %T", where, kind, value)}
 		}
-		// JSON has one numeric type; the document has two. A client that
-		// reads an id into an int is why the difference matters.
+		// JSON numbers decode as float64, so integers are checked explicitly.
 		if kind == "integer" && number != math.Trunc(number) {
 			return []string{fmt.Sprintf("%s: the document says integer, the service sent %v", where, number)}
 		}
@@ -309,9 +306,7 @@ func validateString(where string, schema map[string]any, text string) []string {
 		}
 	}
 
-	// A format the document declares is a promise to whoever parses the
-	// value. An unknown format is not an error - OpenAPI allows any string -
-	// so only the ones this document actually uses are judged.
+	// Unknown formats are allowed by OpenAPI and ignored here.
 	switch format, _ := schema["format"].(string); format {
 	case "date-time":
 		if _, err := time.Parse(time.RFC3339, text); err != nil {
@@ -337,9 +332,7 @@ func validateString(where string, schema map[string]any, text string) []string {
 func validateNumber(where string, schema map[string]any, number float64) []string {
 	var problems []string
 
-	// OpenAPI 3.0 spells the exclusive bounds as booleans beside minimum and
-	// maximum; 3.1 spells them as numbers of their own. Both are read, so
-	// the checker does not quietly ignore a bound written the other way.
+	// Accept both OpenAPI 3.0 (boolean) and 3.1 (numeric) exclusive bounds.
 	if limit, ok := asFloat(schema["minimum"]); ok {
 		exclusive, _ := schema["exclusiveMinimum"].(bool)
 		if (exclusive && number <= limit) || (!exclusive && number < limit) {
@@ -362,8 +355,7 @@ func validateNumber(where string, schema map[string]any, number float64) []strin
 	return problems
 }
 
-// boundsOnCount covers every min/max pair that counts something: characters
-// in a string, items in an array, properties in an object.
+// boundsOnCount checks min/max limits on string length, array items and object properties.
 func boundsOnCount(where, unit string, count int, min, max any) []string {
 	var problems []string
 	if limit, ok := asFloat(min); ok && float64(count) < limit {
@@ -375,7 +367,7 @@ func boundsOnCount(where, unit string, count int, min, max any) []string {
 	return problems
 }
 
-// YAML numbers arrive as int or float64 depending on how they were written.
+// asFloat accepts YAML numbers decoded as int or float64.
 func asFloat(value any) (float64, bool) {
 	switch n := value.(type) {
 	case int:
@@ -395,9 +387,7 @@ func sortedKeys(m map[string]any) []string {
 	return keys
 }
 
-// ---------------------------------------------------------------------------
-// A service that answers every endpoint with a realistic payload.
-// ---------------------------------------------------------------------------
+// Fake services that return realistic payloads for every endpoint.
 
 func sampleUser() domain.User {
 	return domain.User{
@@ -585,8 +575,6 @@ func TestOpenAPI_ResponsesMatchTheDocument(t *testing.T) {
 	}
 }
 
-// Errors are part of the contract too: a client that only knows the happy
-// path cannot tell a rejected request from a broken server.
 func TestOpenAPI_ErrorResponsesMatchTheDocument(t *testing.T) {
 	spec := loadSpec(t)
 
@@ -628,9 +616,6 @@ func TestOpenAPI_ErrorResponsesMatchTheDocument(t *testing.T) {
 	}
 }
 
-// The code is what a client branches on, so it is checked against the
-// document's own list rather than against whatever the handler happens to
-// send today.
 func TestOpenAPI_ErrorCodesAreTheDocumentedOnes(t *testing.T) {
 	spec := loadSpec(t)
 	app := contractApp(t)

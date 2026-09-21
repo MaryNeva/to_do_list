@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
-	_ "github.com/golang-migrate/migrate/v4/database/postgres" // migration driver, registered via side-effect import
-	_ "github.com/golang-migrate/migrate/v4/source/file"       // migration source, registered via side-effect import
+	_ "github.com/golang-migrate/migrate/v4/database/postgres" // registers the postgres migration driver
+	_ "github.com/golang-migrate/migrate/v4/source/file"       // registers the file:// migration source
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"to-do-list/internal/auth/password"
@@ -50,11 +50,8 @@ func main() {
 }
 
 func run(cfg config.Config, log *slog.Logger, build buildinfo.Info) error {
-	// Two contexts, and the difference is the whole of graceful shutdown.
-	// signalCtx is cancelled the moment SIGTERM arrives; it only decides when
-	// to start stopping. Requests hang off requestCtx, which stays alive
-	// through the grace period, so a signal does not cancel the work the
-	// shutdown is supposed to be waiting for.
+	// signalCtx only decides when to start stopping. Requests use requestCtx,
+	// which stays alive through the grace period and is cancelled by Drain.
 	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -140,8 +137,7 @@ func run(cfg config.Config, log *slog.Logger, build buildinfo.Info) error {
 		Timeout:   cfg.DBCallTimeout,
 	}, log, usecase.WithMetrics(metrics))
 
-	// The janitor is background work nobody is waiting for, so it stops with
-	// the signal rather than with the last request.
+	// Cleanup is background work, so it stops on the signal without a grace period.
 	cleanupCtx, stopCleanup := context.WithCancel(signalCtx)
 	var cleanupDone sync.WaitGroup
 	defer cleanupDone.Wait()
@@ -184,9 +180,7 @@ func run(cfg config.Config, log *slog.Logger, build buildinfo.Info) error {
 		httpapi.Check{Name: "postgres", Probe: pool.Ping},
 	)
 
-	// The listener is opened before anything reports success: a metrics port
-	// that is already taken must stop the process, not leave a service that
-	// passes every health check and exports nothing.
+	// Open the metrics listener before serving so a busy port fails startup.
 	var metricsServer *httpserver.MetricsServer
 	metricsErr := make(chan error, 1)
 	if cfg.MetricsEnabled && cfg.MetricsAddress != "" {
@@ -220,17 +214,13 @@ func run(cfg config.Config, log *slog.Logger, build buildinfo.Info) error {
 		metrics:    metricsErr,
 		hasMetrics: metricsServer != nil,
 	}, func() error {
-		// Both servers stop accepting and drain at once, sharing one budget;
-		// anything still running when it runs out is cancelled afterwards,
-		// which is the first moment a request context is touched. The pool
-		// outlives this call - it is closed by the deferred Close above,
-		// after Drain has cancelled whatever was still holding a connection.
+		// Request contexts are cancelled only after the grace period. The pool
+		// is closed later by the deferred Close.
 		return httpserver.Drain(cfg.ShutdownTimeout, abandonInFlight, app, metricsServer)
 	}, cfg.ShutdownTimeout, log)
 }
 
-// stopSignals is everything that can end a run: the shutdown signal, and the
-// two listeners, each of which reports exactly once on its channel.
+// stopSignals lists what can end a run. Each listener reports exactly once.
 type stopSignals struct {
 	signal     <-chan struct{}
 	serve      <-chan error
@@ -238,16 +228,9 @@ type stopSignals struct {
 	hasMetrics bool
 }
 
-// awaitStop waits for the first of those, then leaves through the one door
-// all three share.
-//
-// A listener that dies on its own is still a shutdown. Returning straight
-// away, as this used to, left the other server accepting connections and
-// closed the database pool underneath every request still running - so a
-// metrics port that was already taken would cut off the API's in-flight
-// work, and an API listener that failed would leave a process serving
-// nothing but /metrics. Here the reason is recorded and the draining is the
-// same draining a signal gets.
+// awaitStop waits for a signal or a listener failure and drains in all cases,
+// so a failed listener does not close the pool under in-flight requests.
+// A listener failure takes precedence over a drain error.
 func awaitStop(stops stopSignals, drain func() error, grace time.Duration, log *slog.Logger) error {
 	var (
 		exitErr         error
@@ -276,9 +259,8 @@ func awaitStop(stops stopSignals, drain func() error, grace time.Duration, log *
 
 	drainErr := drain()
 
-	// Wait for the goroutines that have not reported yet, so none of them is
-	// still running when the process leaves. The one that woke the select
-	// has already reported; reading it again would hang.
+	// Wait for listeners that have not reported yet; the one that woke the
+	// select must not be read again.
 	if !serveReported {
 		<-stops.serve
 	}
@@ -292,9 +274,6 @@ func awaitStop(stops stopSignals, drain func() error, grace time.Duration, log *
 
 	switch {
 	case exitErr != nil:
-		// The failure that started this is the answer. A drain error on the
-		// way out is a consequence of it, logged just above and not worth
-		// replacing the cause with.
 		return exitErr
 	case drainErr != nil:
 		return fmt.Errorf("graceful shutdown: %w", drainErr)

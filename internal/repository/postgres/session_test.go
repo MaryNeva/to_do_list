@@ -471,8 +471,7 @@ func TestLogin_CannotStoreASessionForAPasswordThatHasBeenReplaced(t *testing.T) 
 		_, loginErr = f.loginWith(t, barrier)
 	}()
 
-	// The login has verified the old password and is about to store its
-	// session. Change the password underneath it.
+	// Login has verified the old password but not yet stored its session.
 	<-verified
 	if _, err := f.userUC.Update(ctx, domain.Claims{UserID: f.user.ID}, f.user.ID, domain.UserEdit{Password: strPtr("a-brand-new-password")}); err != nil {
 		t.Fatalf("change password: %v", err)
@@ -530,7 +529,6 @@ func TestRotate_RejectsATokenThatExpiredWhileWaitingForTheLock(t *testing.T) {
 	f := newSessionFixture(t)
 	ctx := context.Background()
 
-	// A session that is still valid now and lapses shortly.
 	const lifetime = 600 * time.Millisecond
 	plain, hash, err := token.NewIssuer().NewRefreshToken()
 	if err != nil {
@@ -552,8 +550,7 @@ func TestRotate_RejectsATokenThatExpiredWhileWaitingForTheLock(t *testing.T) {
 		rotateDone <- err
 	}()
 
-	// Let the rotation reach the lock, then hold it until the token has
-	// certainly lapsed.
+	// Hold the user lock until the token has expired.
 	<-rotateStarted
 	time.Sleep(lifetime + 200*time.Millisecond)
 	release(false)
@@ -658,16 +655,10 @@ func TestLogin_WaitsForAnInFlightPasswordChange(t *testing.T) {
 	}
 }
 
-// Replaying a consumed token is the one event that ends every session of the
-// account. Detecting it and acting on it are now one transaction under the
-// same lock on the user row: before, the use case made a second call, and if
-// that call failed the client still got the ordinary 401 while the other
-// sessions stayed alive.
 func TestRotate_ReplayEndsEverySessionInTheSameTransaction(t *testing.T) {
 	f := newSessionFixture(t)
 	ctx := context.Background()
 
-	// Three live sessions, one of which is about to be replayed.
 	replayed := f.login(t)
 	second := f.login(t)
 	third := f.login(t)
@@ -682,7 +673,7 @@ func TestRotate_ReplayEndsEverySessionInTheSameTransaction(t *testing.T) {
 		t.Fatalf("%d live sessions before the replay, want 3", live)
 	}
 
-	// The same token again: a stolen copy, or a retry that lost the race.
+	// Replay the consumed token.
 	result, err := f.refresh.Rotate(ctx, sha256Hex(replayed.RefreshToken), domain.RefreshToken{
 		TokenHash: "a-brand-new-hash",
 		ExpiresAt: time.Now().Add(time.Hour),
@@ -705,8 +696,7 @@ func TestRotate_ReplayEndsEverySessionInTheSameTransaction(t *testing.T) {
 		t.Errorf("%d sessions are still live after the replay, want 0", live)
 	}
 
-	// And every token that existed is now useless, including the one the
-	// first rotation had just issued.
+	// Every token is revoked, including the one issued by the first rotation.
 	for name, refreshToken := range map[string]string{
 		"the token issued by the rotation": rotated.RefreshToken,
 		"a second session":                 second.RefreshToken,

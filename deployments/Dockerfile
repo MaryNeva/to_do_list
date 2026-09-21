@@ -1,34 +1,25 @@
 # syntax=docker/dockerfile:1
 
-# The Go line, not a patch release: patches are where the standard library's
-# security fixes land, and a pinned one goes quietly stale. This must stay
-# the line CI verifies with govulncheck - deployments/toolchain_test.go fails
-# if the two drift apart.
+# Track the Go minor line (not a patch) so rebuilds get stdlib security fixes.
+# Must match GO_VERSION in CI; deployments/toolchain_test.go checks this.
 FROM golang:1.25-alpine AS build
 WORKDIR /src
 
-# Dependencies first, in their own layer: this step only re-runs when
-# go.mod/go.sum change, so editing source code does not re-download the module
-# graph. `go mod tidy` is deliberately NOT run here - the image must build
-# exactly what the repository pins, and tidying inside the build would quietly
-# repair a go.mod/go.sum that is broken for everyone else.
+# Separate layer so source edits do not re-download modules. No go mod tidy:
+# the image must build exactly what go.mod/go.sum pin.
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Only what the binary needs. Anything else that lands in the build context is
-# excluded by .dockerignore, but listing the inputs explicitly keeps the cache
-# from being invalidated by unrelated files.
+# Copy only build inputs so unrelated files do not invalidate the cache.
 COPY cmd ./cmd
 COPY internal ./internal
 
-# Stamped into the binary and exposed as todo_build_info and GET /healthz, so
-# a running instance can say which revision it is.
+# Exposed via todo_build_info and GET /healthz.
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
 
-# -mod=readonly fails the build if go.mod or go.sum would have to change,
-# rather than changing them.
+# -mod=readonly fails instead of modifying go.mod/go.sum.
 RUN CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath \
     -ldflags="-s -w \
       -X to-do-list/internal/buildinfo.version=${VERSION} \
@@ -43,9 +34,7 @@ RUN apk add --no-cache ca-certificates tzdata \
 WORKDIR /app
 COPY --from=build /out/server ./server
 COPY migrations ./migrations
-# config.yaml holds every non-secret setting and has no compiled-in
-# fallbacks, so the image would not start without it. Secrets still come
-# from the environment (docker-compose.yml passes them in).
+# Required at startup: there are no compiled-in defaults. Secrets come from the environment.
 COPY config.yaml ./config.yaml
 
 USER app

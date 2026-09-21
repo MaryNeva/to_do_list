@@ -11,8 +11,8 @@ type CreateTaskRequest struct {
 	Description string `json:"description"`
 }
 
-// UpdateTaskRequest is a partial edit: an omitted field keeps its value, a
-// field sent as "" clears it (title excepted), and null reads as omitted.
+// UpdateTaskRequest is a partial edit. Omitted and null fields are unchanged;
+// "" clears the description and is rejected for the title.
 type UpdateTaskRequest struct {
 	Title       *string `json:"title"`
 	Description *string `json:"description"`

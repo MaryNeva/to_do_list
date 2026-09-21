@@ -1,23 +1,12 @@
 #!/usr/bin/env bash
-# Proves the migrations are reversible and safe to apply to a database that
-# already holds data.
+# Checks that migrations are reversible (up -> down -> up gives the same
+# schema) and that the newest migration keeps existing rows.
+# Runs in a throwaway database created and dropped by this script.
 #
-# Two things are checked, and neither is covered by the integration suite,
-# which only ever migrates an empty schema forward:
+# Usage: scripts/migrate-verify.sh
 #
-#   1. up -> down -> up leaves the schema where it started.
-#   2. applying the newest migration to a database that already has rows
-#      keeps those rows and fills the new column.
-#
-# The work happens in a throwaway database that is created and dropped here,
-# so nothing touches the development database.
-#
-# Usage:
-#   scripts/migrate-verify.sh
-#
-# Connection: MIGRATE_VERIFY_ADMIN_URL points at a database the script may
-# create and drop others from (default: the service's own connection with the
-# database swapped for "postgres").
+# MIGRATE_VERIFY_ADMIN_URL: connection used to create/drop the database
+# (default: the service DSN with the database set to "postgres").
 
 set -euo pipefail
 
@@ -26,22 +15,17 @@ cd "$ROOT_DIR"
 
 MIGRATE_VERSION="${MIGRATE_VERSION:-v4.19.1}"
 MIGRATIONS_DIR="${MIGRATIONS_DIR:-migrations}"
-# A name this run owns. $$ alone repeats - after a reboot, or across
-# containers - and everything below is written on the assumption that this
-# database belongs to nobody else.
+# Unique per run: PID alone can repeat across reboots or containers.
 VERIFY_DB="${VERIFY_DB:-to_do_migrate_verify_$$_$(date +%s)}"
 
-# The name is interpolated into SQL as an identifier, so it is validated
-# rather than escaped: anything that is not a plain identifier is refused.
+# Interpolated into SQL, so only plain identifiers are allowed.
 if ! [[ "$VERIFY_DB" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]]; then
 	echo "VERIFY_DB=${VERIFY_DB} is not a plain SQL identifier" >&2
 	exit 2
 fi
 
-# MIGRATE_BIN lets a caller supply an already-built CLI (CI, or an offline
-# machine); otherwise the pinned version is fetched and run on the spot. The
-# postgres build tag is what registers the driver - without it the CLI starts
-# and then reports "unknown driver postgres".
+# MIGRATE_BIN: prebuilt CLI; otherwise run the pinned version with the
+# postgres build tag (required to register the driver).
 migrate() {
 	if [[ -n "${MIGRATE_BIN:-}" ]]; then
 		"$MIGRATE_BIN" "$@"
@@ -50,8 +34,7 @@ migrate() {
 	fi
 }
 
-# The service resolves the DSN itself, so a password with @ : or / is escaped
-# the same way here as in the running process.
+# Use the service's own DSN builder so passwords are escaped identically.
 BASE_URL="$(go run ./cmd/dsn)"
 
 ADMIN_URL="${MIGRATE_VERIFY_ADMIN_URL:-$(python3 - "$BASE_URL" <<'PY'
@@ -62,10 +45,8 @@ print(urlunparse(u._replace(path="/postgres")))
 PY
 )}"
 
-# Built from ADMIN_URL, not from the service's own DSN: the database is
-# created on the admin connection's server, so that is where it has to be
-# migrated. Deriving it from BASE_URL would create it on one server and
-# verify migrations on another whenever the two differ.
+# Derived from ADMIN_URL so the database is migrated on the server where it
+# was created.
 VERIFY_URL="$(python3 - "$ADMIN_URL" "$VERIFY_DB" <<'PY'
 import sys
 from urllib.parse import urlparse, urlunparse
@@ -77,10 +58,8 @@ PY
 psql_admin() { psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -tA "$@"; }
 psql_verify() { psql "$VERIFY_URL" -v ON_ERROR_STOP=1 -tA "$@"; }
 
-# Armed before the database exists, so that a failure anywhere after the
-# CREATE still tidies up - which means it also has to know when there is
-# nothing of its own to tidy. Without this flag, pointing VERIFY_DB at a
-# database that already exists and failing to create it drops that database.
+# The trap drops the database only if this run created it (CREATED=1), so an
+# existing database named VERIFY_DB is never dropped.
 CREATED=0
 cleanup() {
 	[[ "$CREATED" == "1" ]] || return 0
@@ -103,8 +82,8 @@ step() {
 	echo "== $1 =="
 }
 
+# Compares columns only; indexes and constraints are not checked.
 schema_fingerprint() {
-	# Column layout of every table the migrations own, in a stable order.
 	psql_verify -c "
 	  SELECT table_name || '.' || column_name || ':' || data_type || ':' || is_nullable
 	  FROM information_schema.columns
@@ -149,8 +128,7 @@ else
 fi
 
 step "Applying the newest migration to a database that already holds data"
-# Roll back to the state before the last migration, insert a row the way an
-# older release would have, then migrate forward over it.
+# Go back one migration, insert rows as an older release would, then migrate up.
 LATEST="$(find "$MIGRATIONS_DIR" -name '*.up.sql' | sed 's#.*/##' | cut -d_ -f1 | sort -n | tail -1)"
 PREVIOUS=$((10#$LATEST - 1))
 

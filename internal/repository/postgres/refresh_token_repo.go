@@ -218,9 +218,8 @@ func (r *RefreshTokenRepository) Rotate(
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return domain.RotateResult{}, fmt.Errorf("postgres: scan consumed refresh token: %w", err)
 		}
-		// The user row is already locked here, so the reaction to a replay
-		// happens in the same transaction that detected it: either every
-		// session of that account ends, or nothing is reported as ended.
+		// Still under the user lock: a replay revokes all sessions in this
+		// transaction, or nothing is committed.
 		revoked, reason := r.handleUnusable(ctx, tx, presentedHash, ownerID)
 		if errors.Is(reason, apperr.ErrTokenReuse) {
 			if err := tx.Commit(ctx); err != nil {
@@ -261,9 +260,9 @@ func (r *RefreshTokenRepository) Rotate(
 	}, nil
 }
 
-// handleUnusable says why the presented token could not be consumed and, for
-// a replay, ends every session of that account before returning. It runs
-// inside the caller's transaction, under the same lock on the user row.
+// handleUnusable classifies a token that could not be consumed. For any
+// already revoked token it revokes all of the user's tokens in tx and returns
+// ErrTokenReuse; the caller commits.
 func (r *RefreshTokenRepository) handleUnusable(ctx context.Context, tx pgx.Tx, hash string, ownerID int64) (int64, error) {
 	var revoked, expired bool
 	err := tx.QueryRow(ctx,

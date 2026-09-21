@@ -259,8 +259,7 @@ func TestParse_RejectsWellSignedButUnacceptableTokens(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Every token here carries a valid signature made with the
-			// service's own secret: only the claims or the algorithm differ.
+			// Signed with the real secret; only claims or algorithm are wrong.
 			tokenString := signedWith(t, tt.method, testSecret, tt.claims)
 
 			got, err := svc.Parse(tokenString)

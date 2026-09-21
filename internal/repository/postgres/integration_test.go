@@ -23,9 +23,7 @@ import (
 	"to-do-list/internal/domain"
 )
 
-// applyMigrations runs the real migration files instead of a copy of the
-// schema kept in this test: a copy silently drifts from migrations/ and the
-// tests then pass against a database the service would never have.
+// applyMigrations applies migrations/ so the tests use the real schema.
 func applyMigrations(t *testing.T, dsn string) {
 	t.Helper()
 
@@ -71,9 +69,8 @@ func testDSN(t *testing.T) string {
 	return dsn
 }
 
-// Every test here starts by truncating the schema, so pointing the suite at
-// a development database costs its contents. The name has to say it is a
-// test database; TEST_DATABASE_ALLOW_ANY_NAME=1 is the deliberate override.
+// requireTestDatabase refuses databases whose name does not end in "_test",
+// because the tests truncate every table. TEST_DATABASE_ALLOW_ANY_NAME=1 overrides.
 func requireTestDatabase(t *testing.T, dsn string) {
 	t.Helper()
 
@@ -86,9 +83,7 @@ func requireTestDatabase(t *testing.T, dsn string) {
 		t.Fatalf("TEST_DATABASE_URL is not a URL: %v", err)
 	}
 
-	// A suffix, not a substring: "latest" contains "test" and is not a test
-	// database, and the cost of being wrong here is the contents of whatever
-	// the URL points at.
+	// Suffix, not substring: "latest" contains "test".
 	name := strings.TrimPrefix(parsed.Path, "/")
 	if !strings.HasSuffix(name, "_test") {
 		t.Fatalf("TEST_DATABASE_URL points at database %q, and these tests TRUNCATE every table. "+
@@ -365,9 +360,6 @@ func TestTaskRepository_UpdateForeignTaskIsNotFound(t *testing.T) {
 	}
 }
 
-// Writing only what was sent is what makes this possible: with a
-// read-modify-write, whichever update committed second would have put the
-// other field back the way it read it.
 func TestConcurrent_TwoPartialUpdatesBothSurvive(t *testing.T) {
 	pool := setupTestPool(t)
 	user := seedUser(t, pool, "alice")
@@ -419,8 +411,6 @@ func strPtr(s string) *string { return &s }
 
 func taskStatusPtr(s domain.TaskStatus) *domain.TaskStatus { return &s }
 
-// pgx otherwise opens four connections per core and keeps them forever:
-// a number unrelated to what Postgres can serve, held across a restart of it.
 func TestNewPool_AppliesTheConfiguredBounds(t *testing.T) {
 	dsn := testDSN(t)
 
@@ -460,8 +450,6 @@ func TestNewPool_AppliesTheConfiguredBounds(t *testing.T) {
 	}
 }
 
-// The ceiling has to be real: with three connections a fourth query waits
-// rather than opening a connection the database never agreed to.
 func TestNewPool_QueriesWaitForTheCeilingRatherThanExceedIt(t *testing.T) {
 	dsn := testDSN(t)
 

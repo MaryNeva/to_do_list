@@ -42,18 +42,17 @@ func TestConcurrent_ProfileUpdateDoesNotLoseOtherFields(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	// Request A reads the row it is about to change the email on.
 	if _, err := repo.GetByID(ctx, user.ID); err != nil {
 		t.Fatalf("A read: %v", err)
 	}
 
-	// Request B changes the password in the meantime.
 	newHash, _ := hasher.Hash(context.Background(), "new-password")
 	if _, err := repo.Update(ctx, user.ID, domain.UserUpdate{PasswordHash: &newHash}); err != nil {
 		t.Fatalf("B update: %v", err)
 	}
 
-	// Request A now writes its field. It must not carry the stale hash back.
+	// Simulates a stale read: A read the row, B changed the password, then A
+	// writes the email. The update must not restore the old hash.
 	newEmail := "new@example.com"
 	if _, err := repo.Update(ctx, user.ID, domain.UserUpdate{Email: &newEmail}); err != nil {
 		t.Fatalf("A update: %v", err)
@@ -71,8 +70,6 @@ func TestConcurrent_ProfileUpdateDoesNotLoseOtherFields(t *testing.T) {
 	}
 }
 
-// TestConcurrent_ProfileUpdatesThroughUseCase runs the same collision through
-// UserUseCase, in parallel, the way two HTTP handlers would.
 func TestConcurrent_ProfileUpdatesThroughUseCase(t *testing.T) {
 	pool := setupTestPool(t)
 	repo := NewUserRepository(pool)
@@ -181,8 +178,7 @@ func TestConcurrent_TwoTogglesProduceTwoTransitions(t *testing.T) {
 	}
 }
 
-// TestConcurrent_ManyTogglesLandOnTheRightStatus runs a full cycle and a bit
-// more: N toggles must advance the status exactly N steps.
+// N concurrent toggles must advance the status exactly N steps.
 func TestConcurrent_ManyTogglesLandOnTheRightStatus(t *testing.T) {
 	pool := setupTestPool(t)
 	user := seedUser(t, pool, "alice")
@@ -255,8 +251,6 @@ func TestCompareAndSetStatus_ForeignTaskIsNotFound(t *testing.T) {
 	}
 }
 
-// TestCompareAndSetStatus_StaleFromIsConflict: a caller whose expected status
-// is out of date is told so, which is what lets the use case retry.
 func TestCompareAndSetStatus_StaleFromIsConflict(t *testing.T) {
 	pool := setupTestPool(t)
 	user := seedUser(t, pool, "alice")
@@ -274,8 +268,6 @@ func TestCompareAndSetStatus_StaleFromIsConflict(t *testing.T) {
 	}
 }
 
-// TestUserUpdate_PartialFieldsOnly: the COALESCE update must leave untouched
-// columns exactly as they were, including when nothing at all is supplied.
 func TestUserUpdate_PartialFieldsOnly(t *testing.T) {
 	pool := setupTestPool(t)
 	repo := NewUserRepository(pool)
@@ -308,8 +300,6 @@ func TestUserUpdate_PartialFieldsOnly(t *testing.T) {
 	}
 }
 
-// TestUserUpdate_DuplicateUsernameIsConflict: the unique constraint has to
-// surface as a conflict from the RETURNING path too.
 func TestUserUpdate_DuplicateUsernameIsConflict(t *testing.T) {
 	pool := setupTestPool(t)
 	repo := NewUserRepository(pool)

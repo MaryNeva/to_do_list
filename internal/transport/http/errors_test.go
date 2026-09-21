@@ -77,8 +77,6 @@ func TestErrorHandler_MapsSentinelErrors(t *testing.T) {
 	}
 }
 
-// The message may be reworded at will; the code is what a client reads, so a
-// rejected field has to arrive as data rather than inside a sentence.
 func TestErrorHandler_ValidationErrorsNameTheirFields(t *testing.T) {
 	type payload struct {
 		Title string `json:"title" validate:"required"`
@@ -172,8 +170,6 @@ type wrappedErr struct {
 func (w *wrappedErr) Error() string { return w.msg + ": " + w.err.Error() }
 func (w *wrappedErr) Unwrap() error { return w.err }
 
-// The code says what went wrong; the message should read as a sentence about
-// this request, not repeat the code in words.
 func TestErrorHandler_MessageDropsTheSentinelPrefix(t *testing.T) {
 	app := appWithHandlerError(fmt.Errorf("%w: title must not be empty", apperr.ErrValidation))
 
@@ -243,8 +239,6 @@ func TestErrorHandler_ATimeoutIsRetryableRatherThanInternal(t *testing.T) {
 	}
 }
 
-// A timeout is logged, but not as a crash: a slow dependency and a panic at
-// the same level make both easy to stop reading.
 func TestErrorHandler_LogsATimeoutAsAWarning(t *testing.T) {
 	var recorded strings.Builder
 	logged := slog.New(slog.NewTextHandler(&recorded, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -264,7 +258,7 @@ func TestErrorHandler_LogsATimeoutAsAWarning(t *testing.T) {
 	if !strings.Contains(line, "level=WARN") {
 		t.Errorf("the timeout was not logged as a warning: %s", line)
 	}
-	// The operator does get the detail the client is not given.
+	// The log keeps the detail hidden from the client.
 	if !strings.Contains(line, "postgres: query tasks") {
 		t.Errorf("the log does not say what timed out: %s", line)
 	}

@@ -582,8 +582,7 @@ components:
         # Lengths are counted in Unicode characters, not bytes.
         username: { type: string, minLength: 3, maxLength: 50 }
         email: { type: string, format: email }
-        # minLength is in characters; maxLength is bcrypt's 72-BYTE limit,
-        # so a password of multi-byte characters may be rejected sooner.
+        # minLength counts characters; maxLength is bcrypt's 72-byte limit.
         password: { type: string, minLength: 8, maxLength: 72 }
 
     LoginRequest:
@@ -607,15 +606,12 @@ components:
 
     LoginResponse:
       type: object
-      # refresh_token and refresh_expires_at are omitted for the bootstrap
-      # admin, so they are not required; the other three always arrive.
+      # Refresh fields are omitted for the bootstrap admin.
       required: [token, token_type, expires_at]
       properties:
         token: { type: string }
         token_type: { type: string, example: Bearer }
         expires_at: { type: string, format: date-time }
-        # Absent for the bootstrap admin, which has no row in users and so
-        # cannot own a session; it re-authenticates with its password.
         refresh_token: { type: string }
         refresh_expires_at: { type: string, format: date-time }
 
@@ -649,13 +645,10 @@ components:
         no property at all. Changing the password revokes every refresh
         token of that user.
       properties:
-        # Lengths are counted in Unicode characters, not bytes. Surrounding
-        # whitespace is trimmed from the username and the email before they
-        # are measured; a password is stored exactly as sent.
+        # Lengths count Unicode characters after trimming; passwords are not trimmed.
         username: { type: string, minLength: 3, maxLength: 50 }
         email: { type: string, format: email, minLength: 3 }
-        # minLength is in characters; maxLength is bcrypt's 72-BYTE limit,
-        # so a password of multi-byte characters may be rejected sooner.
+        # minLength counts characters; maxLength is bcrypt's 72-byte limit.
         password: { type: string, minLength: 8, maxLength: 72 }
 
     CreateTaskRequest:

@@ -91,8 +91,7 @@ func (uc *UserUseCase) Update(ctx context.Context, actor domain.Claims, id int64
 		fields.Username = &username
 	}
 	if edit.Email != nil {
-		// validateEmail rejects "" with "email is required", which is the
-		// right answer here as well: the address cannot be removed.
+		// An empty email is rejected: the address cannot be removed.
 		email := strings.TrimSpace(*edit.Email)
 		if err := validateEmail(email); err != nil {
 			return domain.User{}, err
@@ -100,8 +99,7 @@ func (uc *UserUseCase) Update(ctx context.Context, actor domain.Claims, id int64
 		fields.Email = &email
 	}
 	if edit.Password != nil {
-		// Not trimmed: leading and trailing spaces are part of a password.
-		// An empty one fails the minimum-length check below.
+		// Passwords are not trimmed; surrounding spaces are significant.
 		newPassword := *edit.Password
 		if err := validatePassword(newPassword, uc.cfg.MinPasswordLength); err != nil {
 			return domain.User{}, err
@@ -180,14 +178,10 @@ func validateUsername(username string, min, max int) error {
 	}
 }
 
-// maxEmailLength is the practical ceiling from RFC 5321: 64 for the local
-// part, 255 for the domain, plus the @.
+// maxEmailLength is the RFC 5321 limit: 64 (local part) + 1 + 255 (domain).
 const maxEmailLength = 320
 
-// validateEmail is the use case's own check, not the transport's. The DTO
-// tag rejects a malformed address before a handler runs, but a caller that
-// reaches Register or Update directly - another use case, a CLI, a test -
-// would otherwise store whatever it was given.
+// validateEmail repeats the DTO check so callers that bypass HTTP are validated too.
 func validateEmail(email string) error {
 	if email == "" {
 		return fmt.Errorf("%w: email is required", apperr.ErrValidation)
@@ -196,9 +190,7 @@ func validateEmail(email string) error {
 		return fmt.Errorf("%w: email must be at most %d characters", apperr.ErrValidation, maxEmailLength)
 	}
 
-	// net/mail accepts the forms RFC 5322 allows, including a display name,
-	// which an address field must not carry: "Mary <m@e.com>" is a valid
-	// address expression and an invalid email column.
+	// ParseAddress accepts display names ("Mary <m@e.com>"); require a bare address.
 	parsed, err := mail.ParseAddress(email)
 	if err != nil || parsed.Address != email {
 		return fmt.Errorf("%w: %q is not a valid email address", apperr.ErrValidation, email)
@@ -208,8 +200,7 @@ func validateEmail(email string) error {
 
 func validatePassword(plain string, min int) error {
 	switch {
-	// Named separately so that a minimum of zero, however it came to be
-	// configured, still cannot admit a passwordless account.
+	// Checked separately so a configured minimum of 0 cannot allow an empty password.
 	case plain == "":
 		return fmt.Errorf("%w: password must not be empty", apperr.ErrValidation)
 	case utf8.RuneCountInString(plain) < min:
@@ -234,7 +225,8 @@ func clampPage(page domain.PageRequest, defaultSize, maxSize int) domain.PageReq
 	return page
 }
 
-// actor must originate from a trusted authenticator, never from request JSON.
+// authorizeUser allows admins, and users acting on their own id unless
+// adminOnly is set. actor must come from verified token claims.
 func authorizeUser(actor domain.Claims, targetID int64, adminOnly bool) error {
 	if actor.UserID < 0 || (actor.UserID == 0 && !actor.IsAdmin) {
 		return apperr.ErrUnauthorized

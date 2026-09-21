@@ -37,10 +37,7 @@ func get(t *testing.T, app *fiber.App) {
 	_ = resp.Body.Close()
 }
 
-// The reason the middleware exists: a handler's context has to end when the
-// server's does, and Fiber's own user context never ends at all. The check
-// happens inside the handler, because the request context is - rightly -
-// cancelled again the moment the request is over.
+// Checked inside the handler: the request context is cancelled when the request ends.
 func TestRequestContext_RequestsEndWithTheBaseContext(t *testing.T) {
 	base, shutdown := context.WithCancel(context.Background())
 
@@ -54,8 +51,6 @@ func TestRequestContext_RequestsEndWithTheBaseContext(t *testing.T) {
 		ctx := c.UserContext()
 		startErr = ctx.Err()
 
-		// The shutdown happens while this request is still running, which is
-		// the only moment the propagation matters.
 		shutdown()
 
 		select {
@@ -79,9 +74,6 @@ func TestRequestContext_RequestsEndWithTheBaseContext(t *testing.T) {
 	}
 }
 
-// Replacing the user context outright would make this middleware's position
-// in the chain an invisible rule: mount anything that stores a value before
-// it, and the value disappears with no error anywhere.
 func TestRequestContext_KeepsWhatAnEarlierMiddlewareStored(t *testing.T) {
 	earlier := func(c *fiber.Ctx) error {
 		c.SetUserContext(context.WithValue(c.UserContext(), marker, "still here"))
@@ -101,9 +93,6 @@ func TestRequestContext_KeepsWhatAnEarlierMiddlewareStored(t *testing.T) {
 	}
 }
 
-// Values are inherited; cancellation is not. A predecessor that hands over a
-// context which is already done must not end a request that has only just
-// started - the request's lifetime is this middleware's to decide.
 func TestRequestContext_DoesNotInheritAPredecessorsCancellation(t *testing.T) {
 	earlier := func(c *fiber.Ctx) error {
 		dead, cancel := context.WithCancel(c.UserContext())
@@ -131,7 +120,6 @@ func TestRequestContext_DoesNotInheritAPredecessorsCancellation(t *testing.T) {
 	}
 }
 
-// The request id is put where both the logger and the handlers look for it.
 func TestRequestContext_CarriesTheRequestID(t *testing.T) {
 	var (
 		fromContext string
@@ -159,8 +147,6 @@ func TestRequestContext_CarriesTheRequestID(t *testing.T) {
 	}
 }
 
-// A nil base is a programming mistake this middleware absorbs rather than
-// panicking on in the first request of a deployment.
 func TestRequestContext_ToleratesANilBase(t *testing.T) {
 	var (
 		ran bool

@@ -11,6 +11,7 @@ import (
 
 const refreshTokenBytes = 32
 
+// NewRefreshToken returns a random token for the client and its hash for storage.
 func NewRefreshToken() (plain, hash string, err error) {
 	buf := make([]byte, refreshTokenBytes)
 	if _, err := rand.Read(buf); err != nil {
@@ -21,6 +22,7 @@ func NewRefreshToken() (plain, hash string, err error) {
 	return plain, HashRefreshToken(plain), nil
 }
 
+// HashRefreshToken returns the hex SHA-256 of plain. Only hashes are stored.
 func HashRefreshToken(plain string) string {
 	sum := sha256.Sum256([]byte(plain))
 	return hex.EncodeToString(sum[:])

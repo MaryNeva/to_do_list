@@ -95,8 +95,7 @@ func New(
 	authLimiter := limiter.New(limiter.Config{
 		Max:        cfg.RateLimitAuthMaxRequests,
 		Expiration: cfg.RateLimitAuthWindow,
-		// Without this the limiter writes its own plain-text body, which is
-		// the one response that would not carry an error code.
+		// Return an error so the 429 uses the standard JSON error body.
 		LimitReached: func(*fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusTooManyRequests, "too many requests, try again later")
 		},

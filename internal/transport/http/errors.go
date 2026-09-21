@@ -13,8 +13,7 @@ import (
 	"to-do-list/internal/apperr"
 )
 
-// Error codes are part of the contract: a client may switch on them, and they
-// outlive any wording change in the accompanying message.
+// Error codes are part of the API contract; messages may change.
 const (
 	CodeValidation         = "validation_error"
 	CodeBadRequest         = "bad_request"
@@ -30,9 +29,8 @@ const (
 	CodeInternal           = "internal_error"
 )
 
-// retryAfterUnavailable is sent with every 503. One second is not a promise
-// that the dependency will be back by then; it is a floor, so that a client
-// retrying in a loop does not add its own load to whatever is already slow.
+// retryAfterUnavailable is the Retry-After value for 503s from the error
+// handler: a minimum delay, not a promise of recovery.
 const retryAfterUnavailable = "1"
 
 func StatusFor(err error) int {
@@ -69,8 +67,8 @@ func StatusFor(err error) int {
 	}
 }
 
-// CodeFor names the failure. Sentinels are asked first so that a wrapped
-// domain error keeps its own code even behind a generic status.
+// CodeFor returns the API error code. Domain sentinels are checked before the
+// status so a wrapped sentinel keeps its own code.
 func CodeFor(err error) string {
 	switch {
 	case errors.Is(err, apperr.ErrNotFound):
@@ -166,8 +164,7 @@ func clientMessage(err error) string {
 		return "request body is invalid"
 	}
 
-	// A wrapped sentinel reads "validation failed: title must not be empty";
-	// the sentinel is already the code, so only the detail is worth sending.
+	// Strip the sentinel prefix: "validation failed: title ..." -> "title ...".
 	message := err.Error()
 	for _, sentinel := range []error{
 		apperr.ErrValidation, apperr.ErrNotFound, apperr.ErrConflict,
@@ -182,8 +179,7 @@ func clientMessage(err error) string {
 	return message
 }
 
-// fieldErrors says which fields were rejected, so a client can point at the
-// input instead of parsing the message.
+// fieldErrors lists rejected fields by JSON name for validator errors.
 func fieldErrors(err error) []fieldError {
 	var validationErrs validator.ValidationErrors
 	if !errors.As(err, &validationErrs) {

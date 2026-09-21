@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
+# Prints the service's own metrics series (used by make metrics).
 
 set -uo pipefail
 
 compose() { docker compose --env-file /dev/null "$@"; }
 
-# printenv inside the container is the only source that cannot disagree with
-# what the service actually read at startup.
+# Read settings from the container, where the service read them.
 container_env() {
 	compose exec -T app printenv "$1" 2>/dev/null | tr -d '\r'
 }
@@ -26,7 +26,7 @@ else
 	namespace="${METRICS_NAMESPACE:-todo}"
 	port="${SERVER_PORT:-8080}"
 
-	# A local run may also have been given a listener of its own.
+	# A local run may also use a separate metrics listener.
 	if [[ -n "${METRICS_ADDRESS:-}" ]]; then
 		port="${METRICS_ADDRESS##*:}"
 	fi
@@ -41,6 +41,5 @@ if [[ -z "$body" ]]; then
 	exit 1
 fi
 
-# Histogram buckets are dropped: they are many and they are not what anyone
-# reads at a prompt.
+# Skip histogram buckets.
 printf '%s\n' "$body" | grep -E "^${namespace}_" | grep -v "_bucket{"

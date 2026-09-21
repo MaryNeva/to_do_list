@@ -1,10 +1,6 @@
 -- Initial schema: users and tasks.
---
--- username/email are UNIQUE since login looks users up by username. status
--- uses a CHECK constraint rather than a Postgres ENUM so adding a new value
--- later is a plain migration instead of an ALTER TYPE. Database user/name
--- creation is left to POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB in
--- deployments/docker-compose.yml, not to a migration.
+-- status uses CHECK instead of an ENUM so new values need no ALTER TYPE.
+-- The database and its owner are created outside migrations (see docker-compose.yml).
 
 CREATE TABLE IF NOT EXISTS users (
     id            BIGSERIAL PRIMARY KEY,

@@ -9,20 +9,15 @@ import (
 	"time"
 )
 
-// Draining is anything that stops accepting new work and waits for what is
-// already running. Both *fiber.App and MetricsServer satisfy it.
+// Draining is a server that can stop accepting work and wait for in-flight
+// requests. *fiber.App and *MetricsServer implement it.
 type Draining interface {
 	ShutdownWithContext(ctx context.Context) error
 }
 
-// Drain performs the shutdown in the order that makes it graceful: stop
-// accepting, wait for the work already in flight, and only then cancel what
-// is left. The request contexts must NOT come from the signal context - a
-// signal cancels that one immediately, and handlers would be interrupted by
-// the very signal that asked for a clean stop.
-//
-// Every server gets the same budget and they drain at the same time, so a
-// slow scrape cannot spend the time the API needed.
+// Drain shuts all servers down concurrently within one timeout, then calls
+// cancelInFlight to cancel whatever is still running. Request contexts must
+// not derive from the signal context, or the signal would cancel them at once.
 func Drain(timeout time.Duration, cancelInFlight context.CancelFunc, servers ...Draining) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -43,7 +38,6 @@ func Drain(timeout time.Duration, cancelInFlight context.CancelFunc, servers ...
 		}
 	}
 
-	// Whatever outlived the grace period is abandoned here, not before.
 	if cancelInFlight != nil {
 		cancelInFlight()
 	}
@@ -51,18 +45,14 @@ func Drain(timeout time.Duration, cancelInFlight context.CancelFunc, servers ...
 	return errors.Join(problems...)
 }
 
-// MetricsServer serves the exporter on a listener of its own. The endpoint
-// has no authentication, so a deployment binds it somewhere only the scraper
-// can reach and publishes nothing but the API port.
+// MetricsServer serves the exporter on its own listener. The endpoint has no
+// authentication, so it must be reachable only by the scraper.
 type MetricsServer struct {
 	srv *http.Server
 	ln  net.Listener
 }
 
-// NewMetricsServer opens the listener immediately. A port already in use has
-// to fail here, while the process can still refuse to start: reported later
-// from a goroutine it would leave a service that passes every health check
-// and exports nothing.
+// NewMetricsServer opens the listener immediately so a busy port fails startup.
 func NewMetricsServer(addr, path string, exporter http.Handler) (*MetricsServer, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -81,11 +71,10 @@ func NewMetricsServer(addr, path string, exporter http.Handler) (*MetricsServer,
 	}, nil
 }
 
-// Addr is the address actually bound, which differs from the requested one
-// when the port was left to the operating system.
+// Addr returns the bound address, which differs from the requested one for port 0.
 func (m *MetricsServer) Addr() string { return m.ln.Addr().String() }
 
-// Serve blocks until the server is shut down, and reports nil in that case.
+// Serve blocks until shutdown and returns nil after a normal shutdown.
 func (m *MetricsServer) Serve() error {
 	if err := m.srv.Serve(m.ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
@@ -93,8 +82,8 @@ func (m *MetricsServer) Serve() error {
 	return nil
 }
 
-// ShutdownWithContext tolerates a nil receiver, so a deployment that serves
-// metrics on the API port can be handed to Drain unconditionally.
+// ShutdownWithContext is safe on a nil receiver, so Drain can be given a
+// metrics server that was never started.
 func (m *MetricsServer) ShutdownWithContext(ctx context.Context) error {
 	if m == nil {
 		return nil

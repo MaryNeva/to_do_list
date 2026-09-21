@@ -46,8 +46,7 @@ func workflowGoLine(t *testing.T) string {
 
 	raw, err := os.ReadFile(workflowPath)
 	if err != nil {
-		// A checkout without the workflow (an export, a vendored copy) has
-		// nothing to disagree with.
+		// Nothing to compare in a copy without the workflow.
 		t.Skipf("no workflow at %s: %v", workflowPath, err)
 	}
 

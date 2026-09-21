@@ -235,7 +235,6 @@ func TestApp_PanicIsAccountedAsA500(t *testing.T) {
 	}
 }
 
-// The ordinary path must keep behaving as before the reorder.
 func TestApp_SuccessfulRequestIsStillAccounted(t *testing.T) {
 	app, recorder, logs := assembledApp(t, panickingAuth{})
 
@@ -278,9 +277,6 @@ func (acceptingAuth) ValidateToken(context.Context, string) (domain.Claims, erro
 	return domain.Claims{UserID: 7}, nil
 }
 
-// The rate limiter answers on its own, before any handler, and used to write
-// a bare "Too Many Requests" - the one response a client could not read the
-// way it reads every other failure.
 func TestApp_RateLimitedRequestCarriesTheErrorEnvelope(t *testing.T) {
 	app := New(
 		context.Background(),
@@ -331,9 +327,8 @@ func TestApp_RateLimitedRequestCarriesTheErrorEnvelope(t *testing.T) {
 	}
 }
 
-// listeningApp serves cfg on a real socket. The in-memory test transport
-// reports a body-limit breach as a transport error rather than a response,
-// so the limit can only be observed over a real connection.
+// listeningApp serves cfg on a real socket: app.Test reports a body-limit
+// breach as a transport error instead of a 413 response.
 func listeningApp(t *testing.T, cfg Config) string {
 	t.Helper()
 
@@ -392,7 +387,6 @@ func limitsConfig() Config {
 	}
 }
 
-// Without a ceiling one POST decides how much memory the process allocates.
 func TestApp_RejectsABodyOverTheLimit(t *testing.T) {
 	base := listeningApp(t, limitsConfig())
 
@@ -435,10 +429,8 @@ func TestApp_AcceptsABodyUnderTheLimit(t *testing.T) {
 	}
 }
 
-// The rate limiter buckets by client address. Behind a reverse proxy the
-// connection is always the proxy's, so the address has to come from a
-// forwarding header - but only from a proxy the operator named, otherwise
-// any caller could mint a fresh bucket per request.
+// A forwarding header is trusted only from configured proxies; otherwise any
+// caller could get a fresh rate-limit bucket per request.
 func TestApp_ForwardedAddressIsOnlyBelievedFromATrustedProxy(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
@@ -489,8 +481,6 @@ func TestApp_ForwardedAddressIsOnlyBelievedFromATrustedProxy(t *testing.T) {
 	}
 }
 
-// With a metrics address configured the exporter must not also sit on the
-// public listener, or moving it there would have bought nothing.
 func TestApp_MetricsLeaveThePublicListenerWhenGivenTheirOwnAddress(t *testing.T) {
 	exporter := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("todo_build_info 1\n"))
@@ -565,8 +555,7 @@ func TestNewMetricsServer_ServesTheExporterAndNothingElse(t *testing.T) {
 		t.Errorf("/metrics = %d %q, want the exporter's output", resp.StatusCode, raw)
 	}
 
-	// Nothing of the API is reachable here, so publishing this port by
-	// mistake exposes metrics only.
+	// The metrics listener must not serve the API.
 	resp, err = http.Get(base + "/api/v1/tasks")
 	if err != nil {
 		t.Fatalf("get /api/v1/tasks: %v", err)

@@ -7,6 +7,8 @@ import (
 	"to-do-list/internal/domain"
 )
 
+// UpdateUserRequest is a partial edit. Omitted and null fields are unchanged;
+// empty values are rejected.
 type UpdateUserRequest struct {
 	Username *string `json:"username"`
 	Email    *string `json:"email" validate:"omitempty,email"`

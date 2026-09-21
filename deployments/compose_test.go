@@ -1,6 +1,5 @@
-// Package deployments holds no code. These tests guard the compose stack,
-// because everything they check is the kind of thing that is quietly
-// loosened during a debugging session and then committed.
+// Package deployments has no code; its tests guard the Compose and image
+// configuration against settings that are easy to loosen by accident.
 package deployments
 
 import (
@@ -28,8 +27,7 @@ type service struct {
 	Command     []string          `yaml:"command"`
 }
 
-// loadCompose merges the base stack with the observability one, the way
-// "docker compose -f ... -f ..." does, so the checks below cover both files.
+// loadCompose merges the given files (both by default) like "docker compose -f ... -f ...".
 func loadCompose(t *testing.T, paths ...string) compose {
 	t.Helper()
 
@@ -68,7 +66,7 @@ func TestCompose_StartingTheAPIDoesNotRequireMonitoringSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read %s: %v", composePath, err)
 	}
-	// Comments are not interpolated; a "${GRAFANA...}" reference would be.
+	// Ignore comments; only interpolated references matter.
 	for i, line := range strings.Split(string(raw), "\n") {
 		if code, _, _ := strings.Cut(line, "#"); strings.Contains(code, "${GRAFANA") {
 			t.Errorf("%s:%d references a Grafana variable, which would block starting the API alone: %s",
@@ -77,8 +75,7 @@ func TestCompose_StartingTheAPIDoesNotRequireMonitoringSecrets(t *testing.T) {
 	}
 }
 
-// A published port with no interface in front of it is published on every
-// interface, so a laptop on café wifi serves its database to the room.
+// A port without a host address is published on every interface.
 func TestCompose_PublishesNothingBeyondThisMachineByDefault(t *testing.T) {
 	file := loadCompose(t)
 
@@ -94,8 +91,7 @@ func TestCompose_PublishesNothingBeyondThisMachineByDefault(t *testing.T) {
 	}
 }
 
-// /metrics is unauthenticated, so it lives on a listener this file never
-// publishes and Prometheus reaches it over the internal network.
+// /metrics is unauthenticated, so its port must not be published.
 func TestCompose_MetricsAreNotOnThePublishedPort(t *testing.T) {
 	file := loadCompose(t)
 
@@ -125,7 +121,6 @@ func TestCompose_MetricsAreNotOnThePublishedPort(t *testing.T) {
 	}
 }
 
-// A password that ships in a repository is not a password.
 func TestCompose_GrafanaHasNoDefaultCredentialsAndNoAnonymousAccess(t *testing.T) {
 	file := loadCompose(t)
 
@@ -148,8 +143,7 @@ func TestCompose_GrafanaHasNoDefaultCredentialsAndNoAnonymousAccess(t *testing.T
 	}
 }
 
-// --web.enable-lifecycle lets anyone who can reach Prometheus reload or stop
-// it, and it has no authentication of its own.
+// --web.enable-lifecycle would let anyone who reaches Prometheus stop or reload it.
 func TestCompose_PrometheusHasNoRemoteControl(t *testing.T) {
 	file := loadCompose(t)
 

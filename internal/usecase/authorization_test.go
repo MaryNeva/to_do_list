@@ -88,8 +88,6 @@ func TestTaskAuthorizationBeforeAnyDependency(t *testing.T) {
 	}
 }
 
-// The owner comes from the claims, so a transport cannot hand in someone
-// else's id.
 func TestTaskOwnerComesFromClaims(t *testing.T) {
 	uc, _ := newTaskUseCaseForTest()
 	ctx := context.Background()

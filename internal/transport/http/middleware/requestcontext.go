@@ -8,9 +8,9 @@ import (
 	"to-do-list/internal/logger"
 )
 
-// RequestContext derives every request's context from base, so cancelling
-// base stops the work already in flight. Fiber's own UserContext starts as
-// context.Background and is never cancelled by anything.
+// RequestContext derives each request context from base, so cancelling base
+// cancels in-flight work (Fiber's default context is never cancelled). Values
+// set by earlier middleware are kept; their cancellation is not.
 func RequestContext(base context.Context) fiber.Handler {
 	if base == nil {
 		base = context.Background()
@@ -36,6 +36,7 @@ func RequestContext(base context.Context) fiber.Handler {
 	}
 }
 
+// inherited takes cancellation from Context and falls back to values for Value.
 type inherited struct {
 	context.Context
 	values context.Context

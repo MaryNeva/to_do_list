@@ -1,19 +1,11 @@
-# Application configuration - every non-secret setting the service reads.
-#
-# Resolution order, lowest priority first:
-#   1. this file
-#   2. .env (git-ignored)
-#   3. real environment variables (what docker-compose.yml sets)
-#
-# There are no defaults compiled into the Go code: if a key below is deleted
-# and no environment variable supplies it, the service refuses to start and
-# names the missing key. Secrets are the exception - they are never read from
-# this file, only from .env or the environment:
+# Every non-secret setting. Precedence: environment > .env > this file.
+# There are no compiled-in defaults: a missing key stops startup.
+# Secrets are read only from .env or the environment:
 #
 #   DB_PASSWORD           Postgres password
 #   JWT_SECRET            JWT signing secret (at least jwt.min_secret_length)
-#   ADMIN_USERNAME        optional superadmin login (empty = disabled)
-#   ADMIN_PASSWORD_HASH   its bcrypt hash: make gen-admin-hash pass='...'
+#   ADMIN_USERNAME        optional bootstrap admin login (empty = disabled)
+#   ADMIN_PASSWORD_HASH   its bcrypt hash: make gen-admin-hash
 
 app:
   name: to-do-list
@@ -25,16 +17,11 @@ server:
   write_timeout: 10s
   # Grace period for in-flight requests after SIGINT/SIGTERM.
   shutdown_timeout: 15s
-  # Largest request body accepted, in bytes. Anything bigger is refused with
-  # 413 before a handler sees it, so one caller cannot buy memory with a
-  # single POST. 1 MiB is far above any request this API defines.
+  # Max request body in bytes; larger bodies get 413 before any handler runs.
   max_body_bytes: 1048576
-  # Behind a reverse proxy the connection always comes from the proxy, so
-  # every caller would share one rate-limit bucket. Naming the proxies here
-  # and setting proxy_header makes the service read the real client address
-  # from that header - but only when the connection really came from one of
-  # them, since the header itself is client-supplied. Leave both empty when
-  # the service is exposed directly.
+  # Behind a reverse proxy, list its addresses and set proxy_header to rate
+  # limit by the real client address. The header is trusted only from these
+  # proxies. Leave both empty when exposed directly.
   trusted_proxies: ""
   proxy_header: ""
 
@@ -46,18 +33,13 @@ db:
   sslmode: disable
   # Startup ping: how long to wait for Postgres before failing fast.
   connect_timeout: 5s
-  # Upper bound on every individual database call made by a use case, so a
-  # wedged query cannot hang a request forever.
+  # Timeout for each use-case operation (database calls and waiting for bcrypt).
   call_timeout: 5s
-  # Pool bounds. max_connections is the hard ceiling on concurrent queries:
-  # requests beyond it wait for a free connection rather than piling onto the
-  # database, and it must stay below Postgres' own max_connections, shared
-  # with every other client. min_connections keeps a few open so a quiet
-  # period is not followed by a burst of handshakes.
+  # Extra queries wait for a free connection. Keep max_connections below the
+  # server's max_connections; min_connections avoids reconnect bursts.
   max_connections: 10
   min_connections: 2
-  # Connections are recycled even when healthy, so a pool cannot sit on the
-  # far side of a restarted database or a load balancer that moved.
+  # Recycle connections so the pool recovers from database restarts.
   max_conn_lifetime: 1h
   max_conn_idle_time: 30m
 
@@ -65,19 +47,15 @@ jwt:
   ttl: 1h
   refresh_ttl: 720h
   issuer: to-do-list
-  # 32 bytes matches HMAC-SHA256's output size, the usual lower bound for an
-  # HS256 secret. The service refuses to start with a shorter JWT_SECRET.
+  # 32 bytes = HMAC-SHA256 output size. A shorter JWT_SECRET stops startup.
   min_secret_length: 32
 
 password:
-  # bcrypt work factor. Higher is slower to crack and slower to log in with.
+  # bcrypt cost: higher is slower for attackers and for logins.
   bcrypt_cost: 12
   min_length: 8
-  # bcrypt is deliberately expensive: at cost 12 one hash costs a core about
-  # a quarter of a second. Without a ceiling, enough simultaneous logins
-  # starve every other request of CPU, so hashing and verification queue
-  # behind this many slots. Set it to roughly the number of cores the process
-  # is given; callers that wait longer than db.call_timeout are turned away.
+  # Concurrent bcrypt operations (cost 12 is ~250 ms of CPU each). Others
+  # queue and fail after db.call_timeout. Roughly the number of CPU cores.
   max_concurrent_hashes: 4
 
 user:
@@ -93,16 +71,14 @@ pagination:
   max_page_size: 100
 
 cleanup:
-  # How often expired refresh tokens are swept out of the table.
+  # How often expired refresh tokens are deleted.
   interval: 1h
-  # Expired rows are kept this long before deletion: replaying a token that
-  # has already been consumed must still be recognisable as reuse, and a row
-  # that is gone looks merely unknown.
+  # Keep expired tokens this long so a replay is still detected as reuse,
+  # not as an unknown token.
   refresh_token_retention: 720h
 
 ratelimit:
-  # Applied to /auth/register and /auth/login only, to slow down online
-  # password guessing.
+  # Per-client limit shared by /auth/register, /auth/login and /auth/refresh.
   auth_max_requests: 20
   auth_window: 1m
 
@@ -116,17 +92,13 @@ health:
   ready_timeout: 2s
 
 observability:
-  # Serves the Prometheus text exposition format on metrics_path. The endpoint
-  # is unauthenticated, so keep it on an internal network or behind an ingress
-  # rule rather than exposing it publicly.
+  # Prometheus endpoint without authentication; do not expose it publicly.
   metrics_enabled: true
   metrics_path: /metrics
-  # Prefixed to every metric name: todo_http_requests_total, and so on.
+  # Metric name prefix, e.g. todo_http_requests_total.
   metrics_namespace: todo
-  # Moves /metrics to its own listener, which docker-compose.yml does not
-  # publish: Prometheus reaches it over the internal network and nothing
-  # outside can. Empty serves it on the public listener instead, which is a
-  # local convenience only - the endpoint has no authentication.
+  # Separate listener for /metrics (unpublished in Compose). Empty serves it
+  # on the public listener; use that only locally.
   metrics_address: ""
 
 log:

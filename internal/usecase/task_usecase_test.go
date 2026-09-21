@@ -273,8 +273,7 @@ func TestTaskUseCase_Update_PartialSemantics(t *testing.T) {
 		{
 			name:   "absent fields keep their values",
 			update: domain.TaskUpdate{Title: ptr("renamed")},
-			// This is the bug this test exists for: renaming used to blank
-			// the description, because the transport sent one either way.
+			// Renaming must not clear the description.
 			wantTitle: "renamed", wantDescription: "the original description", wantStatus: domain.StatusInProgress,
 		},
 		{
@@ -347,8 +346,6 @@ func TestTaskUseCase_Update_PartialSemantics(t *testing.T) {
 	}
 }
 
-// What toggle-status cannot promise: the same call twice leaves the task
-// where the caller asked for it, so a retry after a lost response is safe.
 func TestTaskUseCase_Update_SettingAStatusIsIdempotent(t *testing.T) {
 	uc, repo := newTaskUseCaseForTest()
 	ctx := context.Background()
@@ -520,8 +517,6 @@ func (r *interferingTaskRepo) CompareAndSetStatus(ctx context.Context, id, owner
 	return r.fakeTaskRepo.CompareAndSetStatus(ctx, id, ownerID, from, to)
 }
 
-// TestTaskUseCase_ToggleStatus_ForeignTaskStaysNotFound: the ownership check
-// must survive the move to a conditional update.
 func TestTaskUseCase_ToggleStatus_ForeignTaskStaysNotFound(t *testing.T) {
 	uc, repo := newTaskUseCaseForTest()
 	owned, _ := repo.Create(context.Background(), domain.Task{Title: "mine", CreatorID: 1, Status: domain.StatusCreated})

@@ -87,8 +87,8 @@ type Config struct {
 	MetricsEnabled   bool
 	MetricsPath      string
 	MetricsNamespace string
-	// MetricsAddress moves /metrics to a listener of its own. Empty keeps it
-	// on the public one, which is a development convenience only.
+	// MetricsAddress serves /metrics on a separate listener; empty serves it
+	// on the public API listener (development only).
 	MetricsAddress string
 }
 
@@ -525,9 +525,8 @@ func (c Config) validate() error {
 			c.DBMaxConnIdle, c.DBMaxConnLife))
 	}
 
-	// A forwarding header is client-supplied. Believing it without naming who
-	// may set it lets anyone claim any address, which would hand every caller
-	// their own rate-limit budget.
+	// Without trusted proxies any client could spoof its address and get its
+	// own rate-limit bucket.
 	if c.ProxyHeader != "" && len(c.TrustedProxies) == 0 {
 		problems = append(problems,
 			"server.proxy_header is set but server.trusted_proxies is empty: "+
@@ -737,8 +736,8 @@ func validEnvKey(key string) bool {
 }
 func readDotEnv(path string) (map[string]string, error) { return ReadEnvFile(path) }
 
-// CommandEnvironment applies the same non-empty environment override policy as
-// LoadFrom, for developer tools which previously sourced .env as shell code.
+// CommandEnvironment merges the .env file at path into environment for
+// developer tools. Non-empty environment values win, as in LoadFrom.
 func CommandEnvironment(path string, environment []string) ([]string, error) {
 	values, err := ReadEnvFile(path)
 	if err != nil {
@@ -759,7 +758,7 @@ func CommandEnvironment(path string, environment []string) ([]string, error) {
 	return result, nil
 }
 
-// fileConfig is the complete non-secret YAML schema. Pointers distinguish missing values from zero values.
+// fileConfig is the non-secret YAML schema. Pointers distinguish missing keys from zero values.
 type fileConfig struct {
 	App struct {
 		Name *string `yaml:"name"`

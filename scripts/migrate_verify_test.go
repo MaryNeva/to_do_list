@@ -27,7 +27,7 @@ case "$*" in
 esac
 exit 0
 `
-	// The script asks the service for its own DSN before anything else.
+	// The script first calls "go run ./cmd/dsn".
 	goStub := `#!/bin/sh
 case "$*" in
   "run ./cmd/dsn") echo "postgres://postgres@127.0.0.1:5432/to_do?sslmode=disable" ;;
@@ -84,7 +84,6 @@ func TestMigrateVerify_DoesNotDropADatabaseItFailedToCreate(t *testing.T) {
 	}
 }
 
-// The other half of the same contract: what this run did create, it removes.
 func TestMigrateVerify_DropsTheDatabaseItCreated(t *testing.T) {
 	binDir, logPath := fakeTools(t, true)
 

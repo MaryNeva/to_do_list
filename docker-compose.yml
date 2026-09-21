@@ -1,28 +1,10 @@
-# Local development stack: Postgres and the API. Prometheus and Grafana live
-# in docker-compose.observability.yml, which is merged in on request:
+# Local development stack: Postgres and the API. Monitoring is in
+# docker-compose.observability.yml (a separate file, because Compose would
+# otherwise require GRAFANA_PASSWORD for this stack too).
 #
-#   docker compose up                                  # db + app
-#   docker compose -f docker-compose.yml \
-#                  -f docker-compose.observability.yml up   # + monitoring
-#
-# They are a separate file rather than a profile because Compose interpolates
-# every variable in a file whatever profile is selected: with Grafana in here,
-# a plain "docker compose up" would demand GRAFANA_PASSWORD to start the API.
-#
-# Everything this stack publishes is bound to 127.0.0.1 by
-# default, so a laptop on a shared network does not hand out its database,
-# dashboards or metrics to whoever else is on that network.
-#
-# BIND_HOST is the one switch between the two modes:
-#
-#   local (the default)   BIND_HOST=127.0.0.1 - reachable from this machine
-#   exposed               BIND_HOST=0.0.0.0   - reachable from the network
-#
-# The exposed mode is for a demo on a trusted network, not for a public
-# deployment. A public deployment terminates TLS in front of the service,
-# gives Grafana and Postgres real credentials, keeps neither of them on a
-# published port, and sets server.trusted_proxies so the rate limiter sees
-# the real client address. Nothing here does any of that.
+# Ports bind to BIND_HOST (default 127.0.0.1). BIND_HOST=0.0.0.0 exposes them
+# to the network; use it only on a trusted network. This file is not a
+# production setup: no TLS, and no trusted proxies for the rate limiter.
 
 
 services:
@@ -35,8 +17,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
       POSTGRES_DB: ${DB_NAME:-to_do}
     ports:
-      # Postgres is published for psql and migrations from the host. Nothing
-      # outside this machine needs it.
+      # For psql and migrations from the host.
       - "${BIND_HOST:-127.0.0.1}:${DB_PORT:-5432}:5432"
     volumes:
       - todo_pgdata:/var/lib/postgresql/data
@@ -62,9 +43,8 @@ services:
     environment:
       APP_ENV: production
 
-      # Container-specific: inside the compose network Postgres answers on
-      # the service name "db" at its own port 5432, whatever host port is
-      # published above. These must match the db service's POSTGRES_* values.
+      # Inside the network Postgres is db:5432 regardless of the published
+      # port. Name and user must match the db service.
       DB_HOST: db
       DB_PORT: 5432
       DB_NAME: ${DB_NAME:-to_do}
@@ -73,31 +53,24 @@ services:
       # Secrets - never in config.yaml.
       DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
-      # Superadmin / bootstrap admin login, see the README section of the
-      # same name. Empty (the default) disables it.
+      # Bootstrap admin login; empty disables it.
       ADMIN_USERNAME: ${ADMIN_USERNAME:-}
       ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-}
 
-      # Optional overrides: empty means "whatever config.yaml says".
+      # Optional overrides; empty keeps the config.yaml value.
       LOG_LEVEL: ${LOG_LEVEL:-}
       LOG_FORMAT: ${LOG_FORMAT:-}
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-}
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-}
       METRICS_ENABLED: ${METRICS_ENABLED:-}
 
-      # Pinned, not overridable from .env: the Prometheus scrape config in
-      # deployments/prometheus/prometheus.yml asks for this path, and the
-      # Grafana dashboard queries series with this prefix. Letting the host
-      # change either would leave the bundled monitoring pointing at nothing,
-      # which is a worse outcome than not being able to rename them here.
-      # deployments/compose_test.go checks that these three stay in step.
+      # Fixed values: prometheus.yml scrapes this path and the Grafana
+      # dashboard queries this prefix. deployments/compose_test.go checks both.
       METRICS_PATH: /metrics
       METRICS_NAMESPACE: todo
 
-      # /metrics gets a listener of its own, and this compose file publishes
-      # no port for it: Prometheus reaches it across the internal network and
-      # nothing outside the stack can. The endpoint has no authentication,
-      # which is exactly why it is not on the published port.
+      # Separate, unpublished listener: /metrics has no authentication and is
+      # reachable only from the Compose network.
       METRICS_ADDRESS: ":9101"
     ports:
       # The container port must match server.address in config.yaml.

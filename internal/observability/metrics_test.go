@@ -149,7 +149,7 @@ func TestPreload_MakesKnownSeriesStartAtZero(t *testing.T) {
 		t.Errorf("preloaded counter = %v, want 0", got)
 	}
 
-	// Preloading must not invent counts.
+	// Preloaded series start at zero.
 	if got := testutil.ToFloat64(m.authAttempts.WithLabelValues("login", "success")); got != 0 {
 		t.Errorf("preloaded counter = %v, want 0", got)
 	}

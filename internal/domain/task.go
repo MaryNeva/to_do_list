@@ -57,8 +57,8 @@ type TaskFilter struct {
 	Page   PageRequest
 }
 
-// TaskUpdate is a partial edit. A nil field was not sent and keeps its
-// current value; a non-nil one is written, so an empty Description clears it.
+// TaskUpdate is a partial edit: nil fields are unchanged, non-nil fields are
+// written (an empty Description clears it).
 type TaskUpdate struct {
 	Title       *string
 	Description *string
@@ -69,7 +69,6 @@ func (u TaskUpdate) IsEmpty() bool {
 	return u.Title == nil && u.Description == nil && u.Status == nil
 }
 
-// Task is the core to-do item entity.
 type Task struct {
 	ID          int64
 	Title       string

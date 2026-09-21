@@ -108,9 +108,8 @@ func (uc *TaskUseCase) List(ctx context.Context, actor domain.Claims, filter dom
 	return page, nil
 }
 
-// Update applies a partial edit. Setting a status here is absolute, so a
-// client that retries after a lost response lands on the status it asked for
-// rather than one step further, which is what ToggleStatus cannot promise.
+// Update applies a partial edit. Unlike ToggleStatus, setting the status is
+// idempotent, so retries are safe.
 func (uc *TaskUseCase) Update(ctx context.Context, actor domain.Claims, id int64, update domain.TaskUpdate) (domain.Task, error) {
 	requesterID, err := taskOwner(actor)
 	if err != nil {
@@ -137,9 +136,8 @@ func (uc *TaskUseCase) Update(ctx context.Context, actor domain.Claims, id int64
 	}
 }
 
-// normalizeUpdate trims what was sent and rejects what a task cannot hold.
-// An absent field is left alone; an empty description clears it, an empty
-// title does not, because a task without a title has nothing to show.
+// normalizeUpdate trims and validates the present fields. An empty
+// description clears it; an empty title is rejected.
 func (uc *TaskUseCase) normalizeUpdate(update domain.TaskUpdate) (domain.TaskUpdate, error) {
 	if update.IsEmpty() {
 		return update, fmt.Errorf("%w: at least one of title, description, status must be present", apperr.ErrValidation)
@@ -238,8 +236,8 @@ func (uc *TaskUseCase) ToggleStatus(ctx context.Context, actor domain.Claims, id
 	return domain.Task{}, fmt.Errorf("%w: task status changed concurrently, try again", apperr.ErrConflict)
 }
 
-// taskOwner is the whole ownership rule: a task belongs to the account that
-// created it. The bootstrap admin has no row in users and so can own none.
+// taskOwner returns the id that owns the caller's tasks. The bootstrap admin
+// (user id 0) has no users row and cannot own tasks.
 func taskOwner(actor domain.Claims) (int64, error) {
 	switch {
 	case actor.UserID > 0:

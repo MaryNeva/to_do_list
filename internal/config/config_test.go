@@ -731,8 +731,6 @@ func TestLoadFrom_RejectsUnusableMetricsSettings(t *testing.T) {
 	}
 }
 
-// A malformed admin hash rejects every admin login. Failing at startup names
-// the variable; failing at login time produces a 500 per attempt and no clue.
 func TestLoadFrom_RejectsAnAdminHashBcryptCannotRead(t *testing.T) {
 	setSecrets(t)
 	t.Setenv("ADMIN_USERNAME", "root")

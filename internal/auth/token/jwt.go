@@ -21,9 +21,8 @@ type claims struct {
 
 const signingAlgorithm = "HS256"
 
-// validateIdentity rejects claims that are correctly signed but describe no
-// usable account. ID 0 is reserved for the bootstrap admin, which has no row
-// in users, so any other token carrying it is malformed.
+// validateIdentity rejects signed claims with an impossible identity. User id
+// 0 is valid only for the bootstrap admin, which has no users row.
 func validateIdentity(c claims) error {
 	switch {
 	case c.UserID < 0:
@@ -81,6 +80,8 @@ func (s *Service) Generate(userID int64, username string, isAdmin bool) (tokenSt
 	return raw, expiresAt, nil
 }
 
+// Parse verifies an HS256 access token and requires exp, the configured issuer
+// and a valid identity. All failures wrap apperr.ErrUnauthorized.
 func (s *Service) Parse(tokenString string) (domain.Claims, error) {
 	if tokenString == "" {
 		return domain.Claims{}, fmt.Errorf("%w: empty token", apperr.ErrUnauthorized)
@@ -89,9 +90,7 @@ func (s *Service) Parse(tokenString string) (domain.Claims, error) {
 	var c claims
 	parser := jwt.NewParser(jwt.WithValidMethods([]string{signingAlgorithm}))
 	parsed, err := parser.ParseWithClaims(tokenString, &c, func(t *jwt.Token) (interface{}, error) {
-		// WithValidMethods already pins the algorithm; this repeats the
-		// check at the point the key is handed out, so a future change to
-		// the parser options cannot silently widen what gets verified.
+		// Defence in depth: WithValidMethods already restricts the algorithm.
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok || t.Method.Alg() != signingAlgorithm {
 			return nil, fmt.Errorf("unexpected signing method %q", t.Header["alg"])
 		}
@@ -117,8 +116,7 @@ func (s *Service) Parse(tokenString string) (domain.Claims, error) {
 		return domain.Claims{}, fmt.Errorf("%w: invalid token", apperr.ErrUnauthorized)
 	}
 
-	// An access token without exp never stops being accepted, so a missing
-	// expiry is rejected rather than treated as "no deadline".
+	// jwt/v4 accepts tokens without exp; require it.
 	if c.ExpiresAt == nil {
 		return domain.Claims{}, fmt.Errorf("%w: token has no expiry", apperr.ErrUnauthorized)
 	}

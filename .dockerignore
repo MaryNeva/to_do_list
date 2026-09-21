@@ -1,7 +1,4 @@
-# Everything the image does not need. Keeping the build context small is not
-# only about speed: without this file, `.env` and the whole git history would
-# be shipped to the daemon, and an unrelated local file would invalidate the
-# build cache.
+# Keep secrets (.env), git history and unrelated files out of the build context.
 
 # Secrets and local configuration
 .env
@@ -45,7 +42,7 @@ coverage.html
 *.tar.gz
 Claude outputs/
 
-# Documentation and scripts: read by people, not by the build
+# Documentation and scripts
 README.md
 LICENSE
 docs/

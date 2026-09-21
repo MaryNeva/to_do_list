@@ -276,12 +276,12 @@ func TestAuthUseCase_Register_CountsCharactersNotBytes(t *testing.T) {
 func TestAuthUseCase_Register_PasswordMinimumIsCharactersCapIsBytes(t *testing.T) {
 	uc, _, _ := newAuthUseCaseForTest(t, "", "")
 
-	// 8 Cyrillic characters = 16 bytes: satisfies a minimum of 8 characters.
+	// 8 Cyrillic characters = 16 bytes; the minimum counts characters.
 	if _, err := uc.Register(context.Background(), "alice", "a@example.com", strings.Repeat("п", 8)); err != nil {
 		t.Errorf("an 8-character Cyrillic password should be accepted, got: %v", err)
 	}
 
-	// 40 Cyrillic characters = 80 bytes: past bcrypt's hard limit.
+	// 40 Cyrillic characters = 80 bytes, over bcrypt's 72-byte limit.
 	uc2, _, _ := newAuthUseCaseForTest(t, "", "")
 	_, err := uc2.Register(context.Background(), "bob", "b@example.com", strings.Repeat("п", 40))
 	if !errors.Is(err, apperr.ErrValidation) {
@@ -353,12 +353,12 @@ func TestAuthUseCase_Refresh_ReuseOfRevokedTokenKillsEverySession(t *testing.T) 
 		t.Fatalf("Refresh(): %v", err)
 	}
 
-	// The attacker replays the token the legitimate client already rotated.
+	// Replay the token the client already rotated.
 	if _, err := uc.Refresh(context.Background(), stolen.RefreshToken); !errors.Is(err, apperr.ErrUnauthorized) {
 		t.Errorf("replaying a revoked token error = %v, want apperr.ErrUnauthorized", err)
 	}
 
-	// The session that replaced it must be taken down as well.
+	// The replacement token is revoked too.
 	if _, err := uc.Refresh(context.Background(), fresh.RefreshToken); !errors.Is(err, apperr.ErrUnauthorized) {
 		t.Errorf("sessions should be revoked after a replay, got: %v", err)
 	}
@@ -525,7 +525,7 @@ func TestAuthUseCase_Login_RefusesASessionForSupersededCredentials(t *testing.T)
 		t.Fatalf("Register() unexpected error: %v", err)
 	}
 
-	// The account's credentials move on while this login is in flight.
+	// The password changes while this login is in flight.
 	refresh.currentCredentialsVersion = func(int64) int64 {
 		return created.CredentialsVersion + 1
 	}
@@ -606,9 +606,6 @@ func TestAuthUseCase_Refresh_AccessTokenKeepsTheUsername(t *testing.T) {
 	}
 }
 
-// A login that never reached bcrypt has not failed authentication. Reporting
-// it as invalid credentials would tell an honest user their password is
-// wrong, and would hide an overloaded process behind a 401.
 func TestAuthUseCase_Login_AFullHashingQueueIsNotABadPassword(t *testing.T) {
 	repo := newFakeUserRepo()
 	refresh := newFakeRefreshRepo()
@@ -634,8 +631,7 @@ func TestAuthUseCase_Login_AFullHashingQueueIsNotABadPassword(t *testing.T) {
 		RefreshTTL:        720 * time.Hour,
 	}, silentLogger())
 
-	// A caller whose budget is already spent stands for one that waited out
-	// its turn in the queue: the hasher refuses before running bcrypt.
+	// An expired context stands in for a timeout while waiting for a hashing slot.
 	spent, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -652,9 +648,6 @@ func TestAuthUseCase_Login_AFullHashingQueueIsNotABadPassword(t *testing.T) {
 	}
 }
 
-// A stored hash that bcrypt cannot read is a broken row, not a bad password.
-// Answering 401 would tell an honest user their password is wrong and hide
-// the corruption from whoever could fix it.
 func TestAuthUseCase_Login_ABrokenStoredHashIsNotInvalidCredentials(t *testing.T) {
 	uc, repo, _ := newAuthUseCaseForTest(t, "", "")
 
