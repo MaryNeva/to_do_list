@@ -20,7 +20,9 @@ the security and correctness choices behind the auth and ownership checks.
   and a minimum-length signing secret enforced at startup.
 - Refresh tokens with rotation and revocation: `POST /auth/refresh` swaps a
   session for a new pair, `POST /auth/logout` ends it, and presenting a token
-  that was already consumed revokes every session that user has. Only a
+  that was already rotated revokes every session that user has. A token ended
+  by logout or a password change is only rejected with `401`, so a stale copy
+  on an old device cannot log the user out of new sessions. Only a
   SHA-256 hash of each token is stored, so a database dump cannot be replayed.
   The exchange is a single transaction taken under a row lock on the owning
   user, so a token can be spent at most once even if several requests present
@@ -36,8 +38,9 @@ the security and correctness choices behind the auth and ownership checks.
   ceiling) returning `{items, total, limit, offset}`; tasks can additionally
   be filtered by `status` and sorted by `created_at`, `updated_at`, `title`
   or `status` in either direction.
-- Usernames are unique and matched case-insensitively (a unique index on
-  `lower(username)`), so "Alice" and "alice" cannot be two accounts.
+- Usernames and emails are unique case-insensitively (unique indexes on
+  `lower(username)` and `lower(email)`), so "Alice" and "alice" cannot be two
+  accounts. The stored value keeps the case it was entered in.
 - Tasks are always scoped to their creator; the ownership check lives in one
   place (the use-case layer) and is exercised by tests.
 - An optional bootstrap admin login (via env vars, not a database row) that
@@ -575,7 +578,7 @@ request*.
 | `todo_http_request_duration_seconds` | histogram | `method`, `route` | Latency quantiles per endpoint |
 | `todo_http_requests_in_flight` | gauge | - | Whether requests are queueing |
 | `todo_auth_attempts_total` | counter | `operation`, `outcome` | Failed-login rate, registration conflicts |
-| `todo_auth_refresh_rotations_total` | counter | `outcome` | Token exchanges, and replays of consumed tokens |
+| `todo_auth_refresh_rotations_total` | counter | `outcome` | Token exchanges (`success`), replays of rotated tokens (`reuse`), tokens ended by logout or a password change (`revoked`), `unknown`, `expired`, `failure` |
 | `todo_auth_sessions_revoked_total` | counter | `reason` | Logouts, password changes, reuse-triggered revocations. Counts sessions actually ended, so one replay that kills three sessions moves it by three, and a revocation that failed moves it not at all |
 | `todo_cleanup_runs_total` | counter | `outcome` | Whether the janitor is running and succeeding |
 | `todo_cleanup_refresh_tokens_removed_total` | counter | - | How much it deletes |
@@ -603,8 +606,9 @@ itself broke. Alert on `failure`, not on `rejected`.
 
 `todo_auth_refresh_rotations_total{outcome="reuse"}` is the one counter worth
 paging on. Any increment means a refresh token was presented after it had
-already been consumed - a replay, or a client bug - and every session of that
-account was ended in response.
+already been rotated - a replay, or a client bug - and every session of that
+account was ended in response. `revoked` is expected noise: an old device
+still holding a token that was logged out or invalidated by a password change.
 
 The endpoint is unauthenticated, like most Prometheus endpoints. Keep it on an
 internal network, or drop `/metrics` at the ingress and scrape the pod

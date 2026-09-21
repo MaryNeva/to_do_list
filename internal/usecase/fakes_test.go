@@ -18,6 +18,10 @@ type fakeRefreshRepo struct {
 	tokens map[string]domain.RefreshToken
 	nextID int64
 
+	// rotated marks hashes revoked by rotation; only those count as reuse,
+	// like revoked_reason = 'rotated' in Postgres.
+	rotated map[string]bool
+
 	rotateErr    error
 	revokeAllErr error
 	failInsert   bool
@@ -27,7 +31,7 @@ type fakeRefreshRepo struct {
 }
 
 func newFakeRefreshRepo() *fakeRefreshRepo {
-	return &fakeRefreshRepo{tokens: make(map[string]domain.RefreshToken), nextID: 1}
+	return &fakeRefreshRepo{tokens: make(map[string]domain.RefreshToken), rotated: make(map[string]bool), nextID: 1}
 }
 
 func (f *fakeRefreshRepo) Create(_ context.Context, token domain.RefreshToken, credentialsVersion int64) (domain.RefreshToken, error) {
@@ -76,6 +80,10 @@ func (f *fakeRefreshRepo) Rotate(
 	if !ok {
 		return domain.RotateResult{}, apperr.ErrNotFound
 	}
+	if presented.RevokedAt != nil && !f.rotated[presentedHash] {
+		return domain.RotateResult{UserID: presented.UserID, Username: f.usernameOf(presented.UserID)},
+			apperr.ErrTokenRevoked
+	}
 	if presented.RevokedAt != nil {
 		revoked, err := f.revokeAllLocked(presented.UserID)
 		if err != nil {
@@ -99,6 +107,7 @@ func (f *fakeRefreshRepo) Rotate(
 	consumedAt := now
 	presented.RevokedAt = &consumedAt
 	f.tokens[presentedHash] = presented
+	f.rotated[presentedHash] = true
 
 	replacement.ID = f.nextID
 	f.nextID++

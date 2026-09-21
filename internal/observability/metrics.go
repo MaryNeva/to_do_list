@@ -65,7 +65,7 @@ func New(namespace string, build buildinfo.Info) *Metrics {
 			Namespace: namespace,
 			Subsystem: "auth",
 			Name:      "refresh_rotations_total",
-			Help:      "Refresh token exchanges, by outcome. The reuse outcome means a consumed token was presented again.",
+			Help:      "Refresh token exchanges, by outcome. The reuse outcome means a rotated token was presented again; revoked means one ended by logout or a password change.",
 		}, []string{"outcome"}),
 
 		sessionsRevoked: prometheus.NewCounterVec(prometheus.CounterOpts{

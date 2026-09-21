@@ -154,7 +154,7 @@ fi
 
 version="$(psql_verify -c "SELECT credentials_version FROM users WHERE username = 'legacy_user';")"
 if [[ "$version" == "1" ]]; then
-	pass "the new column was backfilled on the existing row (credentials_version=${version})"
+	pass "the pre-existing row has credentials_version=${version}"
 else
 	fail "credentials_version on the pre-existing row is '${version}', want 1"
 fi

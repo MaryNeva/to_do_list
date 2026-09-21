@@ -21,10 +21,13 @@ var (
 	// ErrForbidden means the caller is authenticated but not allowed to act.
 	ErrForbidden = errors.New("forbidden")
 
-	// ErrTokenReuse means an already revoked refresh token was presented. It is
-	// separate from ErrConflict, which also covers a generated-hash collision
-	// that must not revoke the user's sessions.
+	// ErrTokenReuse means a refresh token that was already rotated was
+	// presented again: a likely stolen copy.
 	ErrTokenReuse = errors.New("refresh token was already used")
+
+	// ErrTokenRevoked means a refresh token revoked by logout or a password
+	// change was presented. Unlike reuse, it does not revoke other sessions.
+	ErrTokenRevoked = errors.New("refresh token was revoked")
 
 	// ErrValidation means invalid input.
 	ErrValidation = errors.New("validation failed")

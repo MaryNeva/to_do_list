@@ -14,14 +14,11 @@ MIGRATE_VERSION := v4.19.1
 STATICCHECK_VERSION := v0.6.1
 GOVULNCHECK_VERSION := v1.1.4
 
-# The migrate CLI registers its database drivers behind build tags: without
-# -tags postgres it starts and then fails with "unknown driver postgres".
+# Without -tags postgres the migrate CLI fails with "unknown driver postgres".
 MIGRATE := go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@$(MIGRATE_VERSION)
 
-# Where the migration commands connect. Left empty, it is resolved at run time
-# by the service's own configuration code rather than pasted together here, so
-# a password containing @ : or / is escaped identically in both. Set
-# DATABASE_URL to point them at a different database.
+# Empty means: build the DSN with ./cmd/dsn, which escapes the password the
+# same way the service does. Set it to target another database.
 DATABASE_URL ?=
 export DATABASE_URL
 
@@ -63,8 +60,7 @@ vet: ## Run go vet
 fmt: ## Format the codebase in place
 	gofmt -w .
 
-# Reports, never rewrites: a check that fixes the thing it is checking can
-# always pass, and then CI is the first to see the unformatted commit.
+# Reports unformatted files without rewriting them.
 fmt-check: ## Fail if anything is not gofmt'd (does not touch any file)
 	@unformatted="$$(gofmt -l .)"; \
 	if [ -n "$$unformatted" ]; then \
@@ -74,8 +70,7 @@ fmt-check: ## Fail if anything is not gofmt'd (does not touch any file)
 		exit 1; \
 	fi
 
-# Pinned, and pinned to versions this Go toolchain can build: @latest tracks
-# a module that already requires a newer Go than this project targets.
+# Tool versions are pinned; @latest may require a newer Go toolchain.
 staticcheck: ## Static analysis beyond go vet (downloads the tool on first run)
 	go run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) ./...
 
@@ -94,8 +89,7 @@ ci: lint test vulncheck test-contract ## Everything CI runs that needs no databa
 tidy: ## Tidy go.mod/go.sum (needs network access)
 	go mod tidy
 
-# The recipes are silenced with @ so the resolved DSN, which carries the
-# database password, is never echoed into a build log.
+# Recipes use @ so the DSN (which contains the password) is not echoed.
 migrate-up: ## Apply all pending migrations
 	@$(ENVEXEC) sh -c '$(MIGRATE) -path $(MIGRATIONS_DIR) -database "$${DATABASE_URL:-$$(go run ./cmd/dsn)}" up'
 
@@ -117,9 +111,8 @@ docker-down: ## Stop and remove the docker compose stack
 docker-logs: ## Tail the app container's logs
 	$(ENVEXEC) docker compose --env-file /dev/null logs -f app
 
-# Two files rather than a profile: Compose interpolates every variable in a
-# file whatever profile is selected, so Grafana's mandatory password would
-# otherwise be required to start the API on its own.
+# A separate file, not a profile: Compose interpolates the whole file, so a
+# profile would make GRAFANA_PASSWORD required for the API stack too.
 observability-up: ## Start the stack together with Prometheus and Grafana (needs GRAFANA_PASSWORD)
 	VERSION=$(VERSION) COMMIT=$(COMMIT) BUILD_DATE=$(BUILD_DATE) \
 		$(ENVEXEC) docker compose --env-file /dev/null $(COMPOSE_OBSERVABILITY) up --build -d
@@ -129,11 +122,8 @@ observability-up: ## Start the stack together with Prometheus and Grafana (needs
 observability-down: ## Stop the stack including Prometheus and Grafana
 	$(ENVEXEC) docker compose --env-file /dev/null $(COMPOSE_OBSERVABILITY) down
 
-# Every part of the address is configurable, so none of it is written here:
-# METRICS_ADDRESS decides whether /metrics has a listener of its own (in
-# compose it does, and that port is deliberately not published, so this reads
-# it from inside the container), METRICS_PATH where it is served and
-# METRICS_NAMESPACE how the series are prefixed.
+# With METRICS_ADDRESS set, the metrics port is not published, so fetch from
+# inside the container; otherwise, or if that fails, use the local API port.
 metrics: ## Print the metrics the running service currently exposes
 	@$(ENVEXEC) sh -c ' \
 		path="$${METRICS_PATH:-/metrics}"; \
@@ -145,10 +135,8 @@ metrics: ## Print the metrics the running service currently exposes
 		[ -n "$$body" ] || body="$$(curl -s "http://localhost:$${SERVER_PORT:-8080}$${path}")"; \
 		printf "%s\n" "$$body" | grep -E "^$${prefix}" | grep -v "_bucket{"'
 
-# The password is prompted for, with echo off, and reaches the program on a
-# pipe. As a make variable it would be pasted into a shell command line: the
-# shell would interpret quotes, $$ and backticks before the program saw it,
-# and the password would sit in ps output and in shell history.
+# The password is read with echo off and piped to hashpw, so it never appears
+# in the command line, ps output or shell history.
 gen-admin-hash: ## Hash a password for ADMIN_PASSWORD_HASH (prompts, does not echo)
 	@printf 'Password to hash: ' >&2; \
 	stty -echo 2>/dev/null || true; \

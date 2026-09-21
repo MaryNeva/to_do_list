@@ -149,6 +149,9 @@ func (uc *UserUseCase) Delete(ctx context.Context, actor domain.Claims, id int64
 	ctx, cancel := context.WithTimeout(ctx, uc.cfg.Timeout)
 	defer cancel()
 	if err := uc.repo.Delete(ctx, id); err != nil {
+		if errors.Is(err, apperr.ErrNotFound) {
+			return err
+		}
 		uc.logger.ErrorContext(ctx, "delete user failed", "error", err, "user_id", id)
 		return fmt.Errorf("delete user: %w", err)
 	}

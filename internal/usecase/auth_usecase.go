@@ -201,10 +201,9 @@ func (a *AuthUseCase) Refresh(ctx context.Context, refreshToken string) (domain.
 		a.logger.WarnContext(ctx, "refresh token reused after it was consumed",
 			"user_id", result.UserID, "sessions_revoked", result.SessionsRevoked)
 		return domain.Tokens{}, fmt.Errorf("%w: refresh token is no longer valid", apperr.ErrUnauthorized)
-	case errors.Is(err, apperr.ErrConflict):
-		a.metrics.RefreshRotation(OutcomeFailure)
-		a.logger.ErrorContext(ctx, "generated refresh token collided with an existing one")
-		return domain.Tokens{}, fmt.Errorf("rotate refresh token: %w", err)
+	case errors.Is(err, apperr.ErrTokenRevoked):
+		a.metrics.RefreshRotation(OutcomeRevoked)
+		return domain.Tokens{}, fmt.Errorf("%w: refresh token was revoked", apperr.ErrUnauthorized)
 	case errors.Is(err, apperr.ErrNotFound):
 		a.metrics.RefreshRotation(OutcomeUnknown)
 		return domain.Tokens{}, fmt.Errorf("%w: unknown refresh token", apperr.ErrUnauthorized)

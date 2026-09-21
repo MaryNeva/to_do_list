@@ -30,8 +30,8 @@ type UserRepository interface {
 }
 type SessionStore interface {
 	// Create stores the token only if the user's credentials_version still
-	// equals the given one. apperr.ErrConflict means it changed (or the hash
-	// collided); apperr.ErrNotFound means the user is gone.
+	// equals the given one. apperr.ErrConflict means it changed;
+	// apperr.ErrNotFound means the user is gone.
 	Create(context.Context, domain.RefreshToken, int64) (domain.RefreshToken, error)
 
 	// Rotate revokes the presented token and inserts the replacement in one
@@ -39,13 +39,13 @@ type SessionStore interface {
 	// once. Expiry uses the database clock.
 	//
 	// Errors:
-	//   - ErrTokenReuse: the token was already revoked (rotated, logged out or
-	//     invalidated by a password change). All of the user's tokens are
-	//     revoked and committed; the count is in RotateResult.SessionsRevoked.
+	//   - ErrTokenReuse: the token was already rotated. All of the user's
+	//     tokens are revoked and committed; the count is in
+	//     RotateResult.SessionsRevoked.
+	//   - ErrTokenRevoked: revoked by logout or a password change.
 	//   - ErrNotFound: unknown token or deleted user.
 	//   - ErrUnauthorized: the token has expired.
-	//   - ErrConflict: the replacement hash already exists (generator failure).
-	// Only ErrTokenReuse writes anything.
+	// Only ErrTokenReuse writes anything. A hash collision is an internal error.
 	Rotate(context.Context, string, domain.RefreshToken) (domain.RotateResult, error)
 
 	// Revoke returns apperr.ErrNotFound if no active token has the given hash.
