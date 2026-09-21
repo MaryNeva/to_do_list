@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Checks that migrations are reversible (up -> down -> up gives the same
-# schema) and that the newest migration keeps existing rows.
+# columns, indexes and constraints) and that migrations 4-6 upgrade and roll
+# back a database that already holds users, tasks and refresh tokens.
 # Runs in a throwaway database created and dropped by this script.
 #
 # Usage: scripts/migrate-verify.sh
@@ -82,14 +83,37 @@ step() {
 	echo "== $1 =="
 }
 
-# Compares columns only; indexes and constraints are not checked.
+# Columns, indexes and constraints of the tables the migrations own.
 schema_fingerprint() {
 	psql_verify -c "
-	  SELECT table_name || '.' || column_name || ':' || data_type || ':' || is_nullable
+	  SELECT 'column ' || table_name || '.' || column_name || ':' || data_type || ':' || is_nullable
+	    || ':' || coalesce(column_default, '')
 	  FROM information_schema.columns
 	  WHERE table_schema = 'public' AND table_name <> 'schema_migrations'
-	  ORDER BY table_name, column_name;"
+	  UNION ALL
+	  SELECT 'index ' || indexname || ': ' || indexdef
+	  FROM pg_indexes
+	  WHERE schemaname = 'public' AND tablename <> 'schema_migrations'
+	  UNION ALL
+	  SELECT 'constraint ' || c.conrelid::regclass || '.' || c.conname || ': ' || pg_get_constraintdef(c.oid)
+	  FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace
+	  WHERE n.nspname = 'public' AND c.conrelid::regclass::text <> 'schema_migrations'
+	  ORDER BY 1;"
 }
+
+has_index() { [[ "$(psql_verify -c "SELECT count(*) FROM pg_indexes WHERE indexname = '$1';")" == "1" ]]; }
+has_constraint() { [[ "$(psql_verify -c "SELECT count(*) FROM pg_constraint WHERE conname = '$1';")" == "1" ]]; }
+has_column() {
+	[[ "$(psql_verify -c "SELECT count(*) FROM information_schema.columns
+	  WHERE table_schema = 'public' AND table_name = '$1' AND column_name = '$2';")" == "1" ]]
+}
+check() { # check "description" command...
+	local what="$1"
+	shift
+	if "$@"; then pass "$what"; else fail "$what"; fi
+}
+rejects() { ! psql_verify -c "$1" >/dev/null 2>&1; }
+goto() { migrate -path "$MIGRATIONS_DIR" -database "$VERIFY_URL" goto "$1"; }
 
 step "Creating the throwaway database ${VERIFY_DB}"
 if [[ "$(psql_admin -c "SELECT count(*) FROM pg_database WHERE datname = '${VERIFY_DB}';")" != "0" ]]; then
@@ -104,7 +128,7 @@ step "Applying every migration (up)"
 migrate -path "$MIGRATIONS_DIR" -database "$VERIFY_URL" up
 AFTER_UP="$(schema_fingerprint)"
 if [[ -n "$AFTER_UP" ]]; then
-	pass "schema created ($(echo "$AFTER_UP" | wc -l | tr -d ' ') columns)"
+	pass "schema created ($(echo "$AFTER_UP" | wc -l | tr -d ' ') columns, indexes and constraints)"
 else
 	fail "the schema is empty after migrating up"
 fi
@@ -127,37 +151,77 @@ else
 	diff <(echo "$AFTER_UP") <(echo "$AFTER_SECOND_UP") || true
 fi
 
-step "Applying the newest migration to a database that already holds data"
-# Go back one migration, insert rows as an older release would, then migrate up.
-LATEST="$(find "$MIGRATIONS_DIR" -name '*.up.sql' | sed 's#.*/##' | cut -d_ -f1 | sort -n | tail -1)"
-PREVIOUS=$((10#$LATEST - 1))
-
-migrate -path "$MIGRATIONS_DIR" -database "$VERIFY_URL" goto "$PREVIOUS"
-
+step "Migration 4 refuses emails that differ only in case"
+goto 3
 psql_verify -c "
-  INSERT INTO users (username, email, password_hash)
-  VALUES ('legacy_user', 'legacy@example.com', 'not-a-real-hash');" >/dev/null
+  INSERT INTO users (username, email, password_hash) VALUES
+    ('legacy_user', 'Legacy@Example.com', 'not-a-real-hash'),
+    ('legacy_twin', 'legacy@example.com', 'not-a-real-hash');" >/dev/null
+if goto 4 >/dev/null 2>&1; then
+	fail "migration 4 accepted two emails that differ only in case"
+else
+	pass "migration 4 fails while case-duplicate emails exist"
+fi
+migrate -path "$MIGRATIONS_DIR" -database "$VERIFY_URL" force 3
+psql_verify -c "DELETE FROM users WHERE username = 'legacy_twin';" >/dev/null
+
+step "Upgrading 3 -> 4 over existing rows"
 psql_verify -c "
   INSERT INTO tasks (title, description, status, creator_id)
   SELECT 'legacy task', 'written before the migration', 'created', id
   FROM users WHERE username = 'legacy_user';" >/dev/null
+check "no case-insensitive email index at version 3" eval '! has_index users_email_lower_key'
+goto 4
+check "migration 4 adds users_email_lower_key" has_index users_email_lower_key
+check "emails are unique regardless of case after migration 4" \
+	rejects "INSERT INTO users (username, email, password_hash) VALUES ('another', 'LEGACY@example.com', 'h');"
+
+step "Upgrading 4 -> 6 over existing refresh tokens"
+psql_verify -c "
+  INSERT INTO refresh_tokens (user_id, token_hash, expires_at, revoked_at)
+  SELECT id, 'legacy-active', now() + interval '1 day', NULL FROM users WHERE username = 'legacy_user'
+  UNION ALL
+  SELECT id, 'legacy-revoked', now() + interval '1 day', now() FROM users WHERE username = 'legacy_user';" >/dev/null
+goto 5
+check "migration 5 adds revoked_reason" has_column refresh_tokens revoked_reason
+check "migration 5 adds refresh_tokens_reason_needs_revocation" has_constraint refresh_tokens_reason_needs_revocation
+check "existing tokens keep a NULL revoked_reason (never treated as reuse)" \
+	test "$(psql_verify -c "SELECT count(*) FROM refresh_tokens WHERE revoked_reason IS NULL;")" == "2"
+check "a reason on an unrevoked token is rejected" \
+	rejects "UPDATE refresh_tokens SET revoked_reason = 'logout' WHERE token_hash = 'legacy-active';"
+check "an unknown reason is rejected" \
+	rejects "UPDATE refresh_tokens SET revoked_reason = 'bogus' WHERE token_hash = 'legacy-revoked';"
 
 migrate -path "$MIGRATIONS_DIR" -database "$VERIFY_URL" up
+check "migration 6 adds idx_refresh_tokens_family_id" has_index idx_refresh_tokens_family_id
+check "every existing token got its own family" \
+	test "$(psql_verify -c "SELECT count(DISTINCT family_id) FROM refresh_tokens WHERE family_id IS NOT NULL;")" == "2"
+check "family_id is required" \
+	test "$(psql_verify -c "SELECT is_nullable FROM information_schema.columns
+	  WHERE table_name = 'refresh_tokens' AND column_name = 'family_id';")" == "NO"
+check "the active token is still active" \
+	test "$(psql_verify -c "SELECT count(*) FROM refresh_tokens WHERE token_hash = 'legacy-active' AND revoked_at IS NULL;")" == "1"
 
 survived="$(psql_verify -c "SELECT count(*) FROM users WHERE username = 'legacy_user';")"
 task_survived="$(psql_verify -c "SELECT count(*) FROM tasks WHERE title = 'legacy task';")"
 if [[ "$survived" == "1" && "$task_survived" == "1" ]]; then
-	pass "existing rows survived the upgrade"
+	pass "existing users and tasks survived the upgrades"
 else
 	fail "rows were lost: users=${survived}, tasks=${task_survived}"
 fi
 
 version="$(psql_verify -c "SELECT credentials_version FROM users WHERE username = 'legacy_user';")"
-if [[ "$version" == "1" ]]; then
-	pass "the pre-existing row has credentials_version=${version}"
-else
-	fail "credentials_version on the pre-existing row is '${version}', want 1"
-fi
+check "the pre-existing user has credentials_version=1" test "$version" == "1"
+
+step "Rolling 6 -> 3 back over the same rows removes what 4-6 added"
+goto 3
+check "users_email_lower_key is gone" eval '! has_index users_email_lower_key'
+check "revoked_reason is gone" eval '! has_column refresh_tokens revoked_reason'
+check "refresh_tokens_reason_needs_revocation is gone" eval '! has_constraint refresh_tokens_reason_needs_revocation'
+check "family_id and its index are gone" eval '! has_column refresh_tokens family_id && ! has_index idx_refresh_tokens_family_id'
+migrate -path "$MIGRATIONS_DIR" -database "$VERIFY_URL" up
+check "the rows survive going back up" \
+	test "$(psql_verify -c "SELECT count(*) FROM refresh_tokens WHERE token_hash IN ('legacy-active', 'legacy-revoked');")" == "2"
 
 dirty="$(psql_verify -c "SELECT dirty FROM schema_migrations;")"
 if [[ "$dirty" == "f" ]]; then

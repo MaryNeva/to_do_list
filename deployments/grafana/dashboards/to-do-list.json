@@ -825,7 +825,7 @@
       "id": 21,
       "type": "timeseries",
       "title": "Refresh token rotations",
-      "description": "success: exchanged. reuse: a rotated token was presented again. revoked: logged out or invalidated by a password change. unknown: no such token. expired: lapsed before it was spent.",
+      "description": "success: exchanged. reuse: a rotated token was presented again while its chain was live. revoked: a token from a chain already ended (logout, password change). unknown: no such token. expired: lapsed before it was spent.",
       "datasource": {
         "type": "prometheus",
         "uid": "todo-prometheus"

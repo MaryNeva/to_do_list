@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+
+	"to-do-list/internal/transport/httpserver"
 )
 
 func TestServeAPI_LogsListeningOnlyAfterTheAddressIsBound(t *testing.T) {
@@ -78,5 +80,61 @@ func TestServeAPI_LogsTheBoundAddressAndServes(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != "pong" {
 		t.Errorf("body = %q, want pong", body)
+	}
+}
+
+// The API port is taken while a scrape hangs on the metrics listener: startup
+// must still fail within the grace period and drop the hung connection.
+func TestStartAPI_StopsTheMetricsServerWithinTheGracePeriod(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+
+	hang := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release
+	})
+	metrics, err := httpserver.NewMetricsServer("127.0.0.1:0", "/metrics", hang)
+	if err != nil {
+		t.Fatalf("NewMetricsServer(): %v", err)
+	}
+	go func() { _ = metrics.Serve() }()
+
+	scrape := make(chan error, 1)
+	go func() {
+		resp, err := http.Get("http://" + metrics.Addr() + "/metrics")
+		if err == nil {
+			resp.Body.Close()
+		}
+		scrape <- err
+	}()
+	<-entered
+
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy a port: %v", err)
+	}
+	defer busy.Close()
+
+	const grace = 200 * time.Millisecond
+	started := time.Now()
+	_, err = startAPI(fiber.New(fiber.Config{DisableStartupMessage: true}), busy.Addr().String(),
+		metrics, grace, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	elapsed := time.Since(started)
+
+	if err == nil {
+		t.Fatal("startAPI() on a busy port returned no error")
+	}
+	if elapsed > grace+time.Second {
+		t.Errorf("startAPI() took %v, want about the %v grace period", elapsed, grace)
+	}
+
+	select {
+	case err := <-scrape:
+		if err == nil {
+			t.Error("the hung scrape completed normally; its connection should have been closed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("the hung scrape's connection is still open after the grace period")
 	}
 }

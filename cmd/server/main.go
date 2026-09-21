@@ -193,16 +193,13 @@ func run(cfg config.Config, log *slog.Logger, build buildinfo.Info) error {
 		go func() { metricsErr <- metricsServer.Serve() }()
 	}
 
-	serveErr, err := serveAPI(app, cfg.ServerAddress, log,
+	serveErr, err := startAPI(app, cfg.ServerAddress, metricsServer, cfg.ShutdownTimeout, log,
 		"metrics_enabled", cfg.MetricsEnabled,
 		"metrics_path", cfg.MetricsPath,
 		"built_at", build.BuiltAt,
 		"go_version", build.GoVersion,
 	)
 	if err != nil {
-		if shutdownErr := metricsServer.ShutdownWithContext(context.Background()); shutdownErr != nil {
-			log.Warn("stop metrics listener", "error", shutdownErr)
-		}
 		return err
 	}
 
@@ -237,6 +234,22 @@ func serveAPI(app apiServer, addr string, log *slog.Logger, attrs ...any) (<-cha
 	served := make(chan error, 1)
 	go func() { served <- app.Listener(ln) }()
 	return served, nil
+}
+
+// startAPI serves the API via serveAPI. If the API cannot start, the metrics
+// server (already serving) is stopped within grace before the error is returned.
+func startAPI(app apiServer, addr string, metrics *httpserver.MetricsServer, grace time.Duration, log *slog.Logger, attrs ...any) (<-chan error, error) {
+	served, err := serveAPI(app, addr, log, attrs...)
+	if err == nil {
+		return served, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	if stopErr := metrics.ShutdownWithContext(ctx); stopErr != nil {
+		log.Warn("metrics listener did not stop within the grace period; open connections were closed", "error", stopErr)
+	}
+	return nil, err
 }
 
 // stopSignals lists what can end a run. Each listener reports exactly once.

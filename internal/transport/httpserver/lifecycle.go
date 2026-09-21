@@ -82,11 +82,19 @@ func (m *MetricsServer) Serve() error {
 	return nil
 }
 
-// ShutdownWithContext is safe on a nil receiver, so Drain can be given a
+// ShutdownWithContext stops accepting and waits for open requests until ctx
+// ends; connections still open then are closed, so a hung scrape cannot
+// outlive the deadline. It is safe on a nil receiver, so Drain can be given a
 // metrics server that was never started.
 func (m *MetricsServer) ShutdownWithContext(ctx context.Context) error {
 	if m == nil {
 		return nil
 	}
-	return m.srv.Shutdown(ctx)
+	err := m.srv.Shutdown(ctx)
+	if err != nil {
+		if closeErr := m.srv.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}
+	return err
 }

@@ -19,10 +19,12 @@ the security and correctness choices behind the auth and ownership checks.
 - JWT authentication (HS256) with algorithm-confusion protection, expiry,
   and a minimum-length signing secret enforced at startup.
 - Refresh tokens with rotation and revocation: `POST /auth/refresh` swaps a
-  session for a new pair, `POST /auth/logout` ends it, and presenting a token
-  that was already rotated revokes every session that user has. A token ended
-  by logout or a password change is only rejected with `401`, so a stale copy
-  on an old device cannot log the user out of new sessions. Only a
+  session for a new pair, `POST /auth/logout` ends it, and replaying a token
+  that was already rotated revokes every session that user has - as long as
+  that login's chain of tokens is still live. Once the chain has ended (logout,
+  password change, an earlier replay), any token from it, including old
+  ancestors, is only rejected with `401`, so a stale copy cannot log the user
+  out of sessions opened later. See "Refresh token reuse" below. Only a
   SHA-256 hash of each token is stored, so a database dump cannot be replayed.
   The exchange is a single transaction taken under a row lock on the owning
   user, so a token can be spent at most once even if several requests present
@@ -441,6 +443,34 @@ and read stale values of each other. A refused login answers `401`, the same
 as a wrong password: from the client's point of view the credentials it used
 are no longer valid, which is exactly true.
 
+#### Refresh token reuse
+
+Every login starts a *family*: the chain of tokens it produces through
+rotation (`refresh_tokens.family_id`). Each revoked token also records why
+(`revoked_reason`: `rotated`, `logout`, `password_change`, `reuse`).
+
+A refresh token that cannot be exchanged is classified as follows:
+
+| Presented token | Its family | Result |
+|---|---|---|
+| rotated | still has a live token | **reuse**: every session of the user is revoked, `401` |
+| rotated | ended (logout, password change, earlier reuse, expiry) | `401`, nothing else changes |
+| revoked by logout, password change or reuse | - | `401`, nothing else changes |
+| expired / unknown | - | `401` |
+
+The reasoning: a replay is dangerous only while someone could still hold the
+live end of that chain. Once the chain is dead, an old token - from a device
+that was offline during a password change, say - can reach nothing, and
+reacting to it by logging the user out of their new sessions would let any
+stale copy do exactly that.
+
+Upgrade limitation: tokens revoked before migration `000005` have no reason,
+and tokens issued before `000006` each got a family of their own. Neither kind
+can trigger reuse detection; a replay of one is a plain `401`. This affects
+only tokens that were already rotated before the upgrade, and ends when they
+expire (`jwt.refresh_ttl`) - `scripts/migrate-verify.sh` and
+`TestRotate_ALegacyRevokedTokenIsNotReuse` pin that behaviour.
+
 #### If the response to a refresh is lost
 
 Rotation is atomic, but atomicity stops at the process boundary. If the
@@ -606,9 +636,9 @@ itself broke. Alert on `failure`, not on `rejected`.
 
 `todo_auth_refresh_rotations_total{outcome="reuse"}` is the one counter worth
 paging on. Any increment means a refresh token was presented after it had
-already been rotated - a replay, or a client bug - and every session of that
-account was ended in response. `revoked` is expected noise: an old device
-still holding a token that was logged out or invalidated by a password change.
+already been rotated while its chain was still live - a replay, or a client
+bug - and every session of that account was ended in response. `revoked` is
+expected noise: an old device presenting a token whose chain was already ended.
 
 The endpoint is unauthenticated, like most Prometheus endpoints. Keep it on an
 internal network, or drop `/metrics` at the ingress and scrape the pod

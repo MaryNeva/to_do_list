@@ -17,7 +17,7 @@ import (
 const refreshTokenColumns = "id, user_id, token_hash, expires_at, revoked_at, created_at"
 
 // Values of refresh_tokens.revoked_reason. Only a replayed reasonRotated token
-// counts as reuse.
+// can count as reuse, and only while its family still has a live token.
 const (
 	reasonRotated        = "rotated"
 	reasonLogout         = "logout"
@@ -241,10 +241,11 @@ func (r *RefreshTokenRepository) Rotate(
 		}, reason
 	}
 
-	issuedRows, err := tx.Query(ctx, `INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
-	          VALUES ($1, $2, $3)
+	// The replacement joins the consumed token's family.
+	issuedRows, err := tx.Query(ctx, `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, family_id)
+	          SELECT user_id, $2, $3, family_id FROM refresh_tokens WHERE token_hash = $1
 	          RETURNING `+refreshTokenColumns,
-		consumed.UserID, replacement.TokenHash, replacement.ExpiresAt)
+		presentedHash, replacement.TokenHash, replacement.ExpiresAt)
 	if err != nil {
 		return domain.RotateResult{}, fmt.Errorf("postgres: insert rotated refresh token: %w", err)
 	}
@@ -266,18 +267,25 @@ func (r *RefreshTokenRepository) Rotate(
 	}, nil
 }
 
-// handleUnusable classifies a token that could not be consumed. Only a token
-// that was already rotated is a replay: then all of the user's tokens are
-// revoked in tx and ErrTokenReuse is returned (the caller commits). A token
-// revoked by logout or a password change returns ErrTokenRevoked and writes nothing.
+// handleUnusable classifies a token that could not be consumed.
+//
+// A replay is a rotated token presented again while its family (the login's
+// chain) still has a live token: someone else may hold that live token, so all
+// of the user's tokens are revoked in tx and ErrTokenReuse is returned (the
+// caller commits). If the family was already ended - by logout, a password
+// change or an earlier reuse - or the token was revoked for any other reason,
+// the replay cannot reach a live session: ErrTokenRevoked, nothing written.
 func (r *RefreshTokenRepository) handleUnusable(ctx context.Context, tx pgx.Tx, hash string, ownerID int64) (int64, error) {
 	var (
-		revoked, expired bool
-		reason           *string
+		revoked, expired, familyLive bool
+		reason                       *string
 	)
 	err := tx.QueryRow(ctx,
-		`SELECT revoked_at IS NOT NULL, revoked_reason, expires_at <= clock_timestamp()
-		 FROM refresh_tokens WHERE token_hash = $1`, hash).Scan(&revoked, &reason, &expired)
+		`SELECT t.revoked_at IS NOT NULL, t.revoked_reason, t.expires_at <= clock_timestamp(),
+		        EXISTS (SELECT 1 FROM refresh_tokens f
+		                WHERE f.family_id = t.family_id
+		                  AND f.revoked_at IS NULL AND f.expires_at > clock_timestamp())
+		 FROM refresh_tokens t WHERE t.token_hash = $1`, hash).Scan(&revoked, &reason, &expired, &familyLive)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return 0, apperr.ErrNotFound
@@ -287,7 +295,7 @@ func (r *RefreshTokenRepository) handleUnusable(ctx context.Context, tx pgx.Tx, 
 		return 0, fmt.Errorf("%w: refresh token expired", apperr.ErrUnauthorized)
 	case !revoked:
 		return 0, fmt.Errorf("%w: refresh token is not usable", apperr.ErrUnauthorized)
-	case reason == nil || *reason != reasonRotated:
+	case reason == nil || *reason != reasonRotated || !familyLive:
 		return 0, apperr.ErrTokenRevoked
 	}
 

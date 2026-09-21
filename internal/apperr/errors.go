@@ -22,11 +22,12 @@ var (
 	ErrForbidden = errors.New("forbidden")
 
 	// ErrTokenReuse means a refresh token that was already rotated was
-	// presented again: a likely stolen copy.
+	// presented again while its login's chain is still live: a likely stolen copy.
 	ErrTokenReuse = errors.New("refresh token was already used")
 
-	// ErrTokenRevoked means a refresh token revoked by logout or a password
-	// change was presented. Unlike reuse, it does not revoke other sessions.
+	// ErrTokenRevoked means a revoked refresh token was presented whose chain
+	// is no longer live (logout, password change, earlier reuse). Unlike
+	// reuse, it does not revoke other sessions.
 	ErrTokenRevoked = errors.New("refresh token was revoked")
 
 	// ErrValidation means invalid input.

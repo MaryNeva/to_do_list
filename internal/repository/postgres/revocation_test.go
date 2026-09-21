@@ -179,3 +179,142 @@ func TestUsers_EmailIsUniqueRegardlessOfCase(t *testing.T) {
 		t.Errorf("Update() of own email case: %v", err)
 	}
 }
+
+// rotate -> end the chain -> log in again -> replay the ancestor. The replay
+// must be rejected without ending the session opened afterwards.
+func TestRotate_AnAncestorOfAnEndedChainDoesNotEndLaterSessions(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		end         func(t *testing.T, f sessionFixture, live string)
+		newPassword string
+	}{
+		{
+			name: "password change",
+			end: func(t *testing.T, f sessionFixture, _ string) {
+				if _, err := f.userUC.Update(context.Background(), domain.Claims{UserID: f.user.ID}, f.user.ID,
+					domain.UserEdit{Password: strPtr("a-brand-new-password")}); err != nil {
+					t.Fatalf("change password: %v", err)
+				}
+			},
+			newPassword: "a-brand-new-password",
+		},
+		{
+			name: "logout",
+			end: func(t *testing.T, f sessionFixture, live string) {
+				if err := f.auth.Logout(context.Background(), live); err != nil {
+					t.Fatalf("Logout(): %v", err)
+				}
+			},
+			newPassword: "s3cret-pass",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSessionFixture(t)
+			ctx := context.Background()
+
+			ancestor := f.login(t)
+			child, err := f.auth.Refresh(ctx, ancestor.RefreshToken)
+			if err != nil {
+				t.Fatalf("Refresh(): %v", err)
+			}
+
+			tc.end(t, f, child.RefreshToken)
+
+			later, _, err := f.auth.Login(ctx, "alice", tc.newPassword)
+			if err != nil {
+				t.Fatalf("Login() after ending the chain: %v", err)
+			}
+
+			result, err := f.refresh.Rotate(ctx, sha256Hex(ancestor.RefreshToken), domain.RefreshToken{
+				TokenHash: "replacement-for-the-ancestor", ExpiresAt: time.Now().Add(time.Hour),
+			})
+			if !errors.Is(err, apperr.ErrTokenRevoked) {
+				t.Fatalf("Rotate() of the ancestor = %v, want apperr.ErrTokenRevoked", err)
+			}
+			if result.SessionsRevoked != 0 {
+				t.Errorf("SessionsRevoked = %d, want 0", result.SessionsRevoked)
+			}
+			if live := f.activeSessions(t); live != 1 {
+				t.Fatalf("%d active sessions, want 1", live)
+			}
+			if _, err := f.auth.Refresh(ctx, later.RefreshToken); err != nil {
+				t.Errorf("the session opened after the chain ended no longer works: %v", err)
+			}
+		})
+	}
+}
+
+// While the chain is live, replaying its ancestor is still reuse.
+func TestRotate_AnAncestorOfALiveChainIsReuse(t *testing.T) {
+	f := newSessionFixture(t)
+	ctx := context.Background()
+
+	ancestor := f.login(t)
+	if _, err := f.auth.Refresh(ctx, ancestor.RefreshToken); err != nil {
+		t.Fatalf("Refresh(): %v", err)
+	}
+	other := f.login(t)
+
+	result, err := f.refresh.Rotate(ctx, sha256Hex(ancestor.RefreshToken), domain.RefreshToken{
+		TokenHash: "replacement-for-the-ancestor", ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if !errors.Is(err, apperr.ErrTokenReuse) {
+		t.Fatalf("Rotate() of the ancestor = %v, want apperr.ErrTokenReuse", err)
+	}
+	if result.SessionsRevoked != 2 {
+		t.Errorf("SessionsRevoked = %d, want 2", result.SessionsRevoked)
+	}
+	if _, err := f.auth.Refresh(ctx, other.RefreshToken); err == nil {
+		t.Error("another session survived a replay of a live chain")
+	}
+}
+
+// A rotation keeps the family; a login starts a new one.
+func TestRotate_TheReplacementJoinsTheFamily(t *testing.T) {
+	f := newSessionFixture(t)
+	ctx := context.Background()
+
+	first := f.login(t)
+	rotated, err := f.auth.Refresh(ctx, first.RefreshToken)
+	if err != nil {
+		t.Fatalf("Refresh(): %v", err)
+	}
+	second := f.login(t)
+
+	family := func(plain string) string {
+		var id string
+		if err := f.pool.QueryRow(ctx, `SELECT family_id::text FROM refresh_tokens WHERE token_hash = $1`,
+			sha256Hex(plain)).Scan(&id); err != nil {
+			t.Fatalf("read family_id: %v", err)
+		}
+		return id
+	}
+	if family(first.RefreshToken) != family(rotated.RefreshToken) {
+		t.Error("the rotated token is not in the same family")
+	}
+	if family(first.RefreshToken) == family(second.RefreshToken) {
+		t.Error("a second login joined the first login's family")
+	}
+}
+
+// Rows revoked before migration 000005 have no reason; they are ordinary
+// revocations and never trigger reuse.
+func TestRotate_ALegacyRevokedTokenIsNotReuse(t *testing.T) {
+	f := newSessionFixture(t)
+	ctx := context.Background()
+
+	other := f.login(t)
+	if _, err := f.pool.Exec(ctx, `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, revoked_at)
+		VALUES ($1, 'legacy-hash', now() + interval '1 day', now())`, f.user.ID); err != nil {
+		t.Fatalf("insert legacy token: %v", err)
+	}
+
+	if _, err := f.refresh.Rotate(ctx, "legacy-hash", domain.RefreshToken{
+		TokenHash: "replacement-for-legacy", ExpiresAt: time.Now().Add(time.Hour),
+	}); !errors.Is(err, apperr.ErrTokenRevoked) {
+		t.Fatalf("Rotate() of a legacy revoked token = %v, want apperr.ErrTokenRevoked", err)
+	}
+	if _, err := f.auth.Refresh(ctx, other.RefreshToken); err != nil {
+		t.Errorf("another session was ended by a legacy token: %v", err)
+	}
+}

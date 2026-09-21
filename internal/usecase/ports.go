@@ -39,10 +39,10 @@ type SessionStore interface {
 	// once. Expiry uses the database clock.
 	//
 	// Errors:
-	//   - ErrTokenReuse: the token was already rotated. All of the user's
-	//     tokens are revoked and committed; the count is in
-	//     RotateResult.SessionsRevoked.
-	//   - ErrTokenRevoked: revoked by logout or a password change.
+	//   - ErrTokenReuse: the token was already rotated and its chain still has a
+	//     live token. All of the user's tokens are revoked and committed; the
+	//     count is in RotateResult.SessionsRevoked.
+	//   - ErrTokenRevoked: revoked, and its chain is no longer live.
 	//   - ErrNotFound: unknown token or deleted user.
 	//   - ErrUnauthorized: the token has expired.
 	// Only ErrTokenReuse writes anything. A hash collision is an internal error.

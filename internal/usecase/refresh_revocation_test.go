@@ -92,3 +92,66 @@ func TestAuthUseCase_Refresh_AStorageFailureIsInternal(t *testing.T) {
 		}
 	}
 }
+
+// An ancestor of a chain that was already ended is rejected without touching
+// sessions opened later.
+func TestAuthUseCase_Refresh_AnAncestorOfAnEndedChainDoesNotRevokeNewSessions(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  func(t *testing.T, uc *AuthUseCase, refresh *fakeRefreshRepo, userID int64, live string)
+	}{
+		{
+			name: "chain ended by logout",
+			end: func(t *testing.T, uc *AuthUseCase, _ *fakeRefreshRepo, _ int64, live string) {
+				if err := uc.Logout(context.Background(), live); err != nil {
+					t.Fatalf("Logout(): %v", err)
+				}
+			},
+		},
+		{
+			name: "chain ended by a password change",
+			end: func(t *testing.T, _ *AuthUseCase, refresh *fakeRefreshRepo, userID int64, _ string) {
+				if _, err := refresh.RevokeAllForUser(context.Background(), userID); err != nil {
+					t.Fatalf("RevokeAllForUser(): %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			metrics := newFakeMetrics()
+			uc, _, _, refresh := newAuthUseCaseWithRefresh(t, "", "", WithMetrics(metrics))
+			ctx := context.Background()
+
+			user, err := uc.Register(ctx, "mary", "mary@example.com", "password123")
+			if err != nil {
+				t.Fatalf("Register(): %v", err)
+			}
+
+			ancestor, _, err := uc.Login(ctx, "mary", "password123")
+			if err != nil {
+				t.Fatalf("Login(): %v", err)
+			}
+			child, err := uc.Refresh(ctx, ancestor.RefreshToken)
+			if err != nil {
+				t.Fatalf("Refresh(): %v", err)
+			}
+
+			tc.end(t, uc, refresh, user.ID, child.RefreshToken)
+
+			later, _, err := uc.Login(ctx, "mary", "password123")
+			if err != nil {
+				t.Fatalf("Login() after ending the chain: %v", err)
+			}
+
+			if _, err := uc.Refresh(ctx, ancestor.RefreshToken); !errors.Is(err, apperr.ErrUnauthorized) {
+				t.Fatalf("replaying the ancestor = %v, want apperr.ErrUnauthorized", err)
+			}
+			if _, err := uc.Refresh(ctx, later.RefreshToken); err != nil {
+				t.Errorf("the session opened later was ended by the replay: %v", err)
+			}
+			if got := metrics.count(metrics.rotation, OutcomeReuse); got != 0 {
+				t.Errorf("reuse recorded %d times, want 0", got)
+			}
+		})
+	}
+}
