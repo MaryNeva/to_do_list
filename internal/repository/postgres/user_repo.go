@@ -210,8 +210,7 @@ func (r *UserRepository) UpdateAndRevokeSessions(ctx context.Context, id int64, 
 		return domain.User{}, 0, fmt.Errorf("postgres: scan updated user: %w", err)
 	}
 
-	tag, err := tx.Exec(ctx,
-		`UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, id)
+	tag, err := revokeAllOfUser(ctx, tx, id, reasonPasswordChange)
 	if err != nil {
 		return domain.User{}, 0, fmt.Errorf("postgres: revoke sessions of user: %w", err)
 	}

@@ -29,7 +29,8 @@ func newFakeUserRepo() *fakeUserRepo {
 
 func (f *fakeUserRepo) Create(_ context.Context, user domain.User) (domain.User, error) {
 	for _, existing := range f.users {
-		if strings.EqualFold(existing.Username, user.Username) || existing.Email == user.Email {
+		// Mirrors the unique indexes on lower(username) and lower(email).
+		if strings.EqualFold(existing.Username, user.Username) || strings.EqualFold(existing.Email, user.Email) {
 			return domain.User{}, apperr.ErrConflict
 		}
 	}
@@ -99,6 +100,11 @@ func (f *fakeUserRepo) Update(_ context.Context, id int64, fields domain.UserUpd
 		user.Username = *fields.Username
 	}
 	if fields.Email != nil {
+		for _, other := range f.users {
+			if other.ID != id && strings.EqualFold(other.Email, *fields.Email) {
+				return domain.User{}, apperr.ErrConflict
+			}
+		}
 		user.Email = *fields.Email
 	}
 	if fields.PasswordHash != nil {

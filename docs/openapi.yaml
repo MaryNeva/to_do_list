@@ -73,7 +73,11 @@ paths:
         new one is issued together with a fresh access token. The exchange is
         atomic, so if several requests present the same token only one is
         served; the others are treated as a replay, which revokes every
-        session of that user - including the one just handed out.
+        session of that user - including the one just handed out. That only
+        applies while the token's chain (one login and its rotations) is
+        still live; tokens from a chain already ended by logout, a password
+        change or an earlier replay are rejected with 401 without revoking
+        anything else.
       requestBody:
         required: true
         content:

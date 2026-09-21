@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"sync"
@@ -192,21 +193,15 @@ func run(cfg config.Config, log *slog.Logger, build buildinfo.Info) error {
 		go func() { metricsErr <- metricsServer.Serve() }()
 	}
 
-	serveErr := make(chan error, 1)
-	go func() {
-		log.Info("listening",
-			"address", cfg.ServerAddress,
-			"metrics_enabled", cfg.MetricsEnabled,
-			"metrics_path", cfg.MetricsPath,
-			"built_at", build.BuiltAt,
-			"go_version", build.GoVersion,
-		)
-		if err := app.Listen(cfg.ServerAddress); err != nil {
-			serveErr <- err
-			return
-		}
-		serveErr <- nil
-	}()
+	serveErr, err := startAPI(app, cfg.ServerAddress, metricsServer, cfg.ShutdownTimeout, log,
+		"metrics_enabled", cfg.MetricsEnabled,
+		"metrics_path", cfg.MetricsPath,
+		"built_at", build.BuiltAt,
+		"go_version", build.GoVersion,
+	)
+	if err != nil {
+		return err
+	}
 
 	return awaitStop(stopSignals{
 		signal:     signalCtx.Done(),
@@ -218,6 +213,43 @@ func run(cfg config.Config, log *slog.Logger, build buildinfo.Info) error {
 		// is closed later by the deferred Close.
 		return httpserver.Drain(cfg.ShutdownTimeout, abandonInFlight, app, metricsServer)
 	}, cfg.ShutdownTimeout, log)
+}
+
+// apiServer is the part of *fiber.App that serveAPI needs.
+type apiServer interface {
+	Listener(net.Listener) error
+}
+
+// serveAPI binds addr and only then logs "listening" with the bound address,
+// so a busy port fails startup without a misleading log line. The returned
+// channel receives the result of serving.
+func serveAPI(app apiServer, addr string, log *slog.Logger, attrs ...any) (<-chan error, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen on %q: %w", addr, err)
+	}
+
+	log.Info("listening", append([]any{"address", ln.Addr().String()}, attrs...)...)
+
+	served := make(chan error, 1)
+	go func() { served <- app.Listener(ln) }()
+	return served, nil
+}
+
+// startAPI serves the API via serveAPI. If the API cannot start, the metrics
+// server (already serving) is stopped within grace before the error is returned.
+func startAPI(app apiServer, addr string, metrics *httpserver.MetricsServer, grace time.Duration, log *slog.Logger, attrs ...any) (<-chan error, error) {
+	served, err := serveAPI(app, addr, log, attrs...)
+	if err == nil {
+		return served, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	if stopErr := metrics.ShutdownWithContext(ctx); stopErr != nil {
+		log.Warn("metrics listener did not stop within the grace period; open connections were closed", "error", stopErr)
+	}
+	return nil, err
 }
 
 // stopSignals lists what can end a run. Each listener reports exactly once.
@@ -296,6 +328,7 @@ func knownMetricLabels() observability.KnownLabels {
 			usecase.OutcomeReuse,
 			usecase.OutcomeUnknown,
 			usecase.OutcomeExpired,
+			usecase.OutcomeRevoked,
 			usecase.OutcomeFailure,
 		},
 		RevocationReasons: []string{

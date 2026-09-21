@@ -19,8 +19,12 @@ the security and correctness choices behind the auth and ownership checks.
 - JWT authentication (HS256) with algorithm-confusion protection, expiry,
   and a minimum-length signing secret enforced at startup.
 - Refresh tokens with rotation and revocation: `POST /auth/refresh` swaps a
-  session for a new pair, `POST /auth/logout` ends it, and presenting a token
-  that was already consumed revokes every session that user has. Only a
+  session for a new pair, `POST /auth/logout` ends it, and replaying a token
+  that was already rotated revokes every session that user has - as long as
+  that login's chain of tokens is still live. Once the chain has ended (logout,
+  password change, an earlier replay), any token from it, including old
+  ancestors, is only rejected with `401`, so a stale copy cannot log the user
+  out of sessions opened later. See "Refresh token reuse" below. Only a
   SHA-256 hash of each token is stored, so a database dump cannot be replayed.
   The exchange is a single transaction taken under a row lock on the owning
   user, so a token can be spent at most once even if several requests present
@@ -36,8 +40,9 @@ the security and correctness choices behind the auth and ownership checks.
   ceiling) returning `{items, total, limit, offset}`; tasks can additionally
   be filtered by `status` and sorted by `created_at`, `updated_at`, `title`
   or `status` in either direction.
-- Usernames are unique and matched case-insensitively (a unique index on
-  `lower(username)`), so "Alice" and "alice" cannot be two accounts.
+- Usernames and emails are unique case-insensitively (unique indexes on
+  `lower(username)` and `lower(email)`), so "Alice" and "alice" cannot be two
+  accounts. The stored value keeps the case it was entered in.
 - Tasks are always scoped to their creator; the ownership check lives in one
   place (the use-case layer) and is exercised by tests.
 - An optional bootstrap admin login (via env vars, not a database row) that
@@ -438,6 +443,34 @@ and read stale values of each other. A refused login answers `401`, the same
 as a wrong password: from the client's point of view the credentials it used
 are no longer valid, which is exactly true.
 
+#### Refresh token reuse
+
+Every login starts a *family*: the chain of tokens it produces through
+rotation (`refresh_tokens.family_id`). Each revoked token also records why
+(`revoked_reason`: `rotated`, `logout`, `password_change`, `reuse`).
+
+A refresh token that cannot be exchanged is classified as follows:
+
+| Presented token | Its family | Result |
+|---|---|---|
+| rotated | still has a live token | **reuse**: every session of the user is revoked, `401` |
+| rotated | ended (logout, password change, earlier reuse, expiry) | `401`, nothing else changes |
+| revoked by logout, password change or reuse | - | `401`, nothing else changes |
+| expired / unknown | - | `401` |
+
+The reasoning: a replay is dangerous only while someone could still hold the
+live end of that chain. Once the chain is dead, an old token - from a device
+that was offline during a password change, say - can reach nothing, and
+reacting to it by logging the user out of their new sessions would let any
+stale copy do exactly that.
+
+Upgrade limitation: tokens revoked before migration `000005` have no reason,
+and tokens issued before `000006` each got a family of their own. Neither kind
+can trigger reuse detection; a replay of one is a plain `401`. This affects
+only tokens that were already rotated before the upgrade, and ends when they
+expire (`jwt.refresh_ttl`) - `scripts/migrate-verify.sh` and
+`TestRotate_ALegacyRevokedTokenIsNotReuse` pin that behaviour.
+
 #### If the response to a refresh is lost
 
 Rotation is atomic, but atomicity stops at the process boundary. If the
@@ -575,7 +608,7 @@ request*.
 | `todo_http_request_duration_seconds` | histogram | `method`, `route` | Latency quantiles per endpoint |
 | `todo_http_requests_in_flight` | gauge | - | Whether requests are queueing |
 | `todo_auth_attempts_total` | counter | `operation`, `outcome` | Failed-login rate, registration conflicts |
-| `todo_auth_refresh_rotations_total` | counter | `outcome` | Token exchanges, and replays of consumed tokens |
+| `todo_auth_refresh_rotations_total` | counter | `outcome` | Token exchanges (`success`), replays of rotated tokens (`reuse`), tokens ended by logout or a password change (`revoked`), `unknown`, `expired`, `failure` |
 | `todo_auth_sessions_revoked_total` | counter | `reason` | Logouts, password changes, reuse-triggered revocations. Counts sessions actually ended, so one replay that kills three sessions moves it by three, and a revocation that failed moves it not at all |
 | `todo_cleanup_runs_total` | counter | `outcome` | Whether the janitor is running and succeeding |
 | `todo_cleanup_refresh_tokens_removed_total` | counter | - | How much it deletes |
@@ -603,8 +636,9 @@ itself broke. Alert on `failure`, not on `rejected`.
 
 `todo_auth_refresh_rotations_total{outcome="reuse"}` is the one counter worth
 paging on. Any increment means a refresh token was presented after it had
-already been consumed - a replay, or a client bug - and every session of that
-account was ended in response.
+already been rotated while its chain was still live - a replay, or a client
+bug - and every session of that account was ended in response. `revoked` is
+expected noise: an old device presenting a token whose chain was already ended.
 
 The endpoint is unauthenticated, like most Prometheus endpoints. Keep it on an
 internal network, or drop `/metrics` at the ingress and scrape the pod

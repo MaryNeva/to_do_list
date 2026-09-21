@@ -187,6 +187,10 @@ func (uc *TaskUseCase) Delete(ctx context.Context, actor domain.Claims, id int64
 	}
 
 	if err := uc.repo.Delete(ctx, id); err != nil {
+		// Deleted concurrently since the ownership check.
+		if errors.Is(err, apperr.ErrNotFound) {
+			return err
+		}
 		uc.logger.ErrorContext(ctx, "delete task failed", "error", err, "task_id", id)
 		return fmt.Errorf("delete task: %w", err)
 	}

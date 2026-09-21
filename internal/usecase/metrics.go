@@ -17,6 +17,7 @@ const (
 	OutcomeReuse    = "reuse"
 	OutcomeExpired  = "expired"
 	OutcomeUnknown  = "unknown"
+	OutcomeRevoked  = "revoked"
 
 	ReasonLogout         = "logout"
 	ReasonTokenReuse     = "token_reuse"
