@@ -149,11 +149,88 @@ cp .env.example .env
 # default in config.yaml - see Configuration below.
 
 make docker-up
-curl http://localhost:8080/healthz
+curl http://localhost:8080/readyz
 ```
 
-This builds the API image and starts it alongside Postgres; migrations run
-automatically on startup. Tear it down with `make docker-down`.
+`make docker-up` builds the API image from the current source, starts it
+alongside Postgres and returns only once both containers report healthy;
+migrations run automatically on startup. The API counts as healthy when
+`GET /readyz` answers `200`, i.e. when it can reach Postgres, not merely when
+the process is up.
+
+### Everyday commands
+
+| Situation | Command | Builds? |
+|---|---|---|
+| First run, or after changing Go code, `go.mod`, `migrations/` or `config.yaml` | `make docker-up` | yes, incrementally |
+| Start again after `docker-stop`, a reboot or `docker-down`, code unchanged | `make docker-start` | no |
+| Pause the stack, keeping the containers | `make docker-stop` | - |
+| Remove the containers (the database volume is kept) | `make docker-down` | - |
+| Follow the API's logs | `make docker-logs` | - |
+| Find out why the stack is not ready | `make docker-diagnose` | - |
+
+Neither `docker-down` nor any other target here removes the `todo_pgdata`
+volume, so the database survives all of them.
+
+`make docker-start` never builds: if the image `to-do-list-app:local` does not
+exist yet, it stops and tells you to run `make docker-up`. It also does not
+notice that the code has changed since the last build - that is what
+`docker-up` is for.
+
+`make docker-up` is cheap to repeat. With nothing changed every layer is
+cached and the running container is left alone (about 3 s). After an edit the
+Dockerfile's BuildKit cache mounts (`/go/pkg/mod`, `/root/.cache/go-build`)
+keep downloaded modules and compiled packages across builds, so only the
+packages the edit touched are recompiled and the container is recreated.
+
+Both start targets wait at most `COMPOSE_WAIT_TIMEOUT` seconds (default 120)
+for the containers to become healthy. The health checks run every 5 s (db)
+and every 10 s (app), so a cold start takes at least ~15 s even when nothing
+is wrong. Shortening `interval` would make the probes run that often for the
+container's whole life; the Engine 25+ `start_interval`, which only speeds up
+the start, is not used so that older Docker versions behave the same.
+
+### When the stack does not become ready
+
+`docker-up` and `docker-start` exit non-zero if a container is still not
+healthy after the timeout, and print the same report `make docker-diagnose`
+gives: container state, the recent health-check results, and the last 50 log
+lines of `db` and `app`. They never print the resolved Compose configuration,
+which contains the secrets. Typical causes:
+
+- `app` health check failing with `503`: the API is up but cannot reach
+  Postgres - look for `readiness check failed` in the app log. A common
+  cause is a `todo_pgdata` volume initialised with a different `DB_PASSWORD`
+  than the one now in `.env`: Postgres keeps the password it was created with.
+- `app` restarting: it refused to start; the first log lines name the bad
+  setting (a missing `JWT_SECRET`, a malformed `ADMIN_PASSWORD_HASH`, a
+  failed migration).
+- `db` not starting: usually a host port already in use (`DB_PORT`).
+- Only slow, not broken (first image pull, a cold machine): retry with
+  `make docker-start COMPOSE_WAIT_TIMEOUT=300`.
+
+Run Compose by hand through the same `.env` loader, e.g.
+`go run ./cmd/envexec docker compose --env-file /dev/null ps`, never with
+`docker compose config`, which prints the secrets.
+
+### Version metadata in the image
+
+`make docker-up`, `make observability-build` and `make smoke-test` stamp the
+image with:
+
+- `VERSION` - `git describe --tags --always --dirty`
+- `COMMIT` - the short hash of `HEAD`
+- `BUILD_DATE` - the **commit time** of `HEAD` (UTC), not the wall clock
+
+These are build arguments, and a changed build argument invalidates the
+`go build` layer. With the wall clock every run would relink the binary and
+recreate the container for nothing, so the date only moves when `HEAD` does;
+an uncommitted change shows up as `-dirty` in the version. To stamp the real
+build time anyway, at the cost of a relink: `make docker-up
+IMAGE_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)`. A plain `docker compose
+build` passes none of these and stamps `dev`/`unknown`. `make build` (the
+local binary) still uses the current time. `GET /healthz` reports what the
+running image carries.
 
 To verify the whole stack actually works end to end - not just that the
 containers start, but that registration, login and task CRUD really hit
@@ -721,11 +798,19 @@ reads it.
 
 ```bash
 # GRAFANA_PASSWORD must be set in .env first - there is no default.
-make observability-up     # db + app + Prometheus + Grafana
+make observability-build  # build the API image (the same one docker-up builds)
+make observability-up     # db + app + Prometheus + Grafana, no build
 # Grafana:    http://127.0.0.1:3000   (log in as admin with GRAFANA_PASSWORD)
 # Prometheus: http://127.0.0.1:9090
 make observability-down
 ```
+
+`observability-up` never builds, so starting it again is quick and does not
+recreate the API container; run `make observability-build` (or `make
+docker-up`) after changing code. Both build targets stamp the same metadata,
+described under [Version metadata in the image](#version-metadata-in-the-image),
+so switching between the two stacks reuses one image. `observability-up`
+waits for the stack the same way `docker-up` does.
 
 Three things about this stack are deliberate, because the usual local-demo
 shortcuts are also the usual ways a laptop ends up serving its database to a

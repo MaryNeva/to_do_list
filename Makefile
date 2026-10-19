@@ -9,6 +9,20 @@ LDFLAGS := -s -w \
 	-X to-do-list/internal/buildinfo.commit=$(COMMIT) \
 	-X to-do-list/internal/buildinfo.date=$(BUILD_DATE)
 COMPOSE_OBSERVABILITY := -f docker-compose.yml -f docker-compose.observability.yml
+
+# Every Compose call goes through envexec, so .env is parsed like the service
+# parses it (bcrypt hashes keep their $) and never by Compose itself.
+COMPOSE := $(ENVEXEC) docker compose --env-file /dev/null
+
+# Upper bound, in seconds, for the stack to report healthy after it starts.
+COMPOSE_WAIT_TIMEOUT ?= 120
+
+# Image metadata. BUILD_DATE above is the wall clock, so it would change the
+# build arguments on every run and relink the binary; images are stamped
+# with the commit time instead, which only moves when HEAD does. Override
+# IMAGE_BUILD_DATE to stamp the real build time.
+IMAGE_BUILD_DATE ?= $(shell TZ=UTC git log -1 --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd 2>/dev/null || echo unknown)
+IMAGE_METADATA = VERSION=$(VERSION) COMMIT=$(COMMIT) BUILD_DATE=$(IMAGE_BUILD_DATE)
 MIGRATIONS_DIR := migrations
 MIGRATE_VERSION := v4.19.1
 STATICCHECK_VERSION := v0.6.1
@@ -25,7 +39,8 @@ export DATABASE_URL
 .PHONY: run build verify test test-integration test-contract cover lint fmt fmt-check vet tidy \
         staticcheck vulncheck cover-total ci \
         migrate-up migrate-down migrate-create migrate-verify \
-        docker-up docker-down docker-logs observability-up observability-down \
+        docker-up docker-start docker-stop docker-down docker-logs docker-diagnose \
+        observability-build observability-up observability-down compose-check \
         metrics gen-admin-hash smoke-test
 
 run: ## Run the API locally (reads .env)
@@ -102,25 +117,77 @@ migrate-create: ## Create a new migration pair: make migrate-create name=add_foo
 migrate-verify: ## Run up -> down -> up against MIGRATE_VERIFY_URL (a throwaway database)
 	@$(ENVEXEC) ./scripts/migrate-verify.sh
 
-docker-up: ## Build and start the app + Postgres via docker compose
-	$(ENVEXEC) docker compose --env-file /dev/null up --build -d
+# "up --wait --wait-timeout" needs a recent Compose v2; check it up front so an
+# old version fails with a clear message instead of "unknown flag".
+compose-check:
+	@docker compose up --help 2>/dev/null | grep -q -- '--wait-timeout' || { \
+		echo "this needs a docker compose whose 'up' supports --wait and --wait-timeout; found: $$(docker compose version 2>&1 | head -1)" >&2; \
+		exit 1; \
+	}
 
-docker-down: ## Stop and remove the docker compose stack
-	$(ENVEXEC) docker compose --env-file /dev/null down
+# Shell snippets shared by the start targets. $(1) is the extra -f flags.
+# The exit code of a failed "up" is kept; diagnostics never print the
+# resolved Compose config, which contains the secrets.
+define compose_up_or_diagnose
+@$(COMPOSE) $(1) up -d $(2) --wait --wait-timeout $(COMPOSE_WAIT_TIMEOUT) || { \
+		rc=$$?; \
+		$(MAKE) --no-print-directory docker-diagnose COMPOSE_FILES='$(1)' >&2; \
+		exit $$rc; \
+	}
+endef
+
+# Tag of the image docker-up builds; must match app.image in docker-compose.yml.
+APP_IMAGE := to-do-list-app:local
+
+# Fails with a hint instead of letting "up --no-build" try to pull a local image.
+define require_app_image
+@docker image inspect $(APP_IMAGE) >/dev/null 2>&1 || { \
+		echo "image $(APP_IMAGE) has not been built yet; run '$(1)' first" >&2; \
+		exit 1; \
+	}
+endef
+
+docker-up: compose-check ## Build the current code and start app + Postgres, waiting until both are healthy
+	@$(IMAGE_METADATA) $(COMPOSE) build app
+	$(call compose_up_or_diagnose,,--no-build)
+
+docker-start: compose-check ## Start the already-built image without building, waiting until healthy
+	$(call require_app_image,make docker-up)
+	$(call compose_up_or_diagnose,,--no-build)
+
+docker-stop: ## Stop the containers, keeping them and the database volume
+	$(COMPOSE) stop
+
+docker-down: ## Stop and remove the docker compose stack (the database volume is kept)
+	$(COMPOSE) down
 
 docker-logs: ## Tail the app container's logs
-	$(ENVEXEC) docker compose --env-file /dev/null logs -f app
+	$(COMPOSE) logs -f app
+
+COMPOSE_FILES ?=
+docker-diagnose: ## Show container state, health-check output and recent logs of an unready stack
+	@echo "== containers ==" ; \
+	$(COMPOSE) $(COMPOSE_FILES) ps -a || true; \
+	echo; echo "== health checks (Docker keeps the last few results) =="; \
+	for c in todo_db todo_app; do \
+		docker inspect --format '{{.Name}}: {{.State.Status}}{{if .State.Health}}, health={{.State.Health.Status}}, failing streak={{.State.Health.FailingStreak}}{{range .State.Health.Log}}{{println}}    exit {{.ExitCode}}: {{.Output}}{{end}}{{end}}' "$$c" 2>/dev/null | grep -v '^[[:space:]]*$$' || echo "/$$c: no such container"; \
+	done; \
+	echo; echo "== last 50 log lines: db, app =="; \
+	$(COMPOSE) $(COMPOSE_FILES) logs --no-color --tail=50 db app || true
 
 # A separate file, not a profile: Compose interpolates the whole file, so a
 # profile would make GRAFANA_PASSWORD required for the API stack too.
-observability-up: ## Start the stack together with Prometheus and Grafana (needs GRAFANA_PASSWORD)
-	VERSION=$(VERSION) COMMIT=$(COMMIT) BUILD_DATE=$(BUILD_DATE) \
-		$(ENVEXEC) docker compose --env-file /dev/null $(COMPOSE_OBSERVABILITY) up --build -d
+observability-build: compose-check ## Build the app image for the monitoring stack (same image as docker-up)
+	@$(IMAGE_METADATA) $(COMPOSE) $(COMPOSE_OBSERVABILITY) build app
+
+observability-up: compose-check ## Start the stack with Prometheus and Grafana without building (needs GRAFANA_PASSWORD)
+	$(call require_app_image,make observability-build)
+	$(call compose_up_or_diagnose,$(COMPOSE_OBSERVABILITY),--no-build)
 	@$(ENVEXEC) sh -c 'echo "Grafana:    http://localhost:$${GRAFANA_PORT:-3000}  (dashboard: to-do-list service)"'
 	@$(ENVEXEC) sh -c 'echo "Prometheus: http://localhost:$${PROMETHEUS_PORT:-9090}"'
 
 observability-down: ## Stop the stack including Prometheus and Grafana
-	$(ENVEXEC) docker compose --env-file /dev/null $(COMPOSE_OBSERVABILITY) down
+	$(COMPOSE) $(COMPOSE_OBSERVABILITY) down
 
 # With METRICS_ADDRESS set, the metrics port is not published, so fetch from
 # inside the container; otherwise, or if that fails, use the local API port.
@@ -145,5 +212,6 @@ gen-admin-hash: ## Hash a password for ADMIN_PASSWORD_HASH (prompts, does not ec
 	printf '\n' >&2; \
 	printf '%s\n' "$$secret" | $(ENVEXEC) go run ./cmd/hashpw
 
+# Same metadata as docker-up, so the two do not keep relinking each other's image.
 smoke-test: ## Start the full stack (db + migrations + app) and verify register/login/task CRUD against real Postgres
-	@./scripts/smoke-test.sh
+	@$(IMAGE_METADATA) ./scripts/smoke-test.sh

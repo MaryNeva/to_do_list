@@ -61,3 +61,16 @@ http-client.private.env.json
 # Local backups and private credentials, if used
 /backups/
 /secrets/
+
+
+__pycache__/
+*.pyc
+.mcp.json
+# Local test credentials and generated artifacts
+private-state.json
+prepared-sessions.json
+burst-progress.json
+grafana-demo-report.json
+report-*.json
+burst-report-*.json
+burst-timeline-*.csv
