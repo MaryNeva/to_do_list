@@ -1,0 +1,250 @@
+{
+  "uid": "todo-auth-demo",
+  "title": "To-do | 2. Authentication and sessions",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "tags": [
+    "to-do-list",
+    "demo"
+  ],
+  "timezone": "browser",
+  "refresh": "15s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Login and registration outcomes",
+      "type": "timeseries",
+      "description": "success: accepted; rejected: expected denial; failure: internal error.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "todo-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (operation,outcome) (increase(todo_auth_attempts_total{job=\"to-do-list\"}[$__range]))",
+          "legendFormat": "{{operation}} · {{outcome}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "todo-prometheus"
+          },
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Refresh token rotation outcomes",
+      "type": "timeseries",
+      "description": "success: new token pair; reuse: rotated token presented again; revoked/expired/unknown: rejected token.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "todo-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (increase(todo_auth_refresh_rotations_total{job=\"to-do-list\"}[$__range]))",
+          "legendFormat": "{{outcome}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "todo-prometheus"
+          },
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Refresh sessions revoked by reason",
+      "type": "timeseries",
+      "description": "Number of sessions, not users. Reasons: logout, password_change, token_reuse.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "todo-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (increase(todo_auth_sessions_revoked_total{job=\"to-do-list\"}[$__range]))",
+          "legendFormat": "{{reason}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "todo-prometheus"
+          },
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "401, 403 and 429 responses per second",
+      "type": "timeseries",
+      "description": "Expected negative tests produce 4xx. A 401 alone is not evidence of an attack.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "todo-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (status,route) (rate(todo_http_requests_total{job=\"to-do-list\",route=~\"/api/v1/.*\",status=~\"401|403|429\"}[$__rate_interval]))",
+          "legendFormat": "{{status}} {{route}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "todo-prometheus"
+          },
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    }
+  ],
+  "links": [
+    {
+      "title": "API",
+      "type": "link",
+      "url": "/d/todo-api-demo",
+      "keepTime": true
+    },
+    {
+      "title": "Authentication",
+      "type": "link",
+      "url": "/d/todo-auth-demo",
+      "keepTime": true
+    },
+    {
+      "title": "Resources",
+      "type": "link",
+      "url": "/d/todo-runtime-demo",
+      "keepTime": true
+    }
+  ]
+}

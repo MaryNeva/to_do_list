@@ -1,11 +1,23 @@
 # to-do-list
 
 [![CI](https://github.com/MaryNeva/to_do_list/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/MaryNeva/to_do_list/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/)
+[![Postgres](https://img.shields.io/badge/PostgreSQL-17-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Licence](https://img.shields.io/badge/licence-source--available-lightgrey)](LICENSE)
 
 A small task-management REST API written in Go: JWT authentication, tasks
 scoped to their owner, and profile management. Built with
 [Fiber](https://gofiber.io), [pgx](https://github.com/jackc/pgx) and
 Postgres, following a straightforward layered (clean) architecture.
+
+One command brings up the whole stack — API, Postgres, migrations — and waits
+until it is actually serving traffic:
+
+```bash
+cp .env.example .env     # set DB_PASSWORD and JWT_SECRET
+make docker-up           # build, start, wait for healthy
+curl localhost:8080/readyz
+```
 
 See [Notable design decisions](#notable-design-decisions) for a rundown of
 the security and correctness choices behind the auth and ownership checks.
@@ -13,6 +25,24 @@ the security and correctness choices behind the auth and ownership checks.
 > This repository is published for reading, not for reuse: it is
 > source-available under an all-rights-reserved [licence](LICENSE), not open
 > source.
+
+## Contents
+
+- [Features](#features)
+- [Architecture](#architecture) — [layers](#layers-and-dependency-direction), [request lifecycle](#request-lifecycle), [package layout](#package-layout)
+- [Quick start (Docker)](#quick-start-docker) — [everyday commands](#everyday-commands), [ports](#ports-and-how-to-move-them), [when the stack does not become ready](#when-the-stack-does-not-become-ready)
+- [Local development (without Docker)](#local-development-without-docker)
+- [Using the API](#using-the-api) — [editing a task](#editing-a-task), [editing a profile](#editing-a-profile), [error responses](#error-responses)
+- [Authentication and sessions](#authentication-and-sessions) — [token flow](#token-flow), [session lifetime](#session-lifetime), [refresh token reuse](#refresh-token-reuse), [bootstrap admin](#superadmin--bootstrap-admin-login)
+- [Data model](#data-model)
+- [Configuration](#configuration) — [secrets](#secrets), [settings](#settings-in-configyaml)
+- [Testing](#testing)
+- [Observability](#observability) — [metrics](#metrics), [health](#health), [log correlation](#log-correlation), [Prometheus and Grafana](#prometheus-and-grafana), [load tests](#load-tests)
+- [Continuous integration](#continuous-integration)
+- [Limits](#limits)
+- [Notable design decisions](#notable-design-decisions)
+- [Roadmap](#roadmap--possible-next-steps)
+- [License](#license)
 
 ## Features
 
@@ -24,15 +54,17 @@ the security and correctness choices behind the auth and ownership checks.
   that login's chain of tokens is still live. Once the chain has ended (logout,
   password change, an earlier replay), any token from it, including old
   ancestors, is only rejected with `401`, so a stale copy cannot log the user
-  out of sessions opened later. See "Refresh token reuse" below. Only a
-  SHA-256 hash of each token is stored, so a database dump cannot be replayed.
-  The exchange is a single transaction taken under a row lock on the owning
-  user, so a token can be spent at most once even if several requests present
-  it at the same moment, and a failed rotation leaves the old token usable.
+  out of sessions opened later. See [Refresh token reuse](#refresh-token-reuse)
+  below. Only a SHA-256 hash of each token is stored, so a database dump cannot
+  be replayed. The exchange is a single transaction taken under a row lock on
+  the owning user, so a token can be spent at most once even if several
+  requests present it at the same moment, and a failed rotation leaves the old
+  token usable.
 - Changing a password ends every refresh session of that account in the same
   transaction as the password write, and a `credentials_version` counter stops
   a login that verified the old password from storing its session afterwards -
-  see "Session lifetime" below for what that does and does not invalidate.
+  see [Session lifetime](#session-lifetime) below for what that does and does
+  not invalidate.
 - Expired refresh tokens are swept by a background janitor that stops with
   the server; rows are kept for a retention period after they lapse so a
   replayed token is still recognisable as reuse rather than as unknown.
@@ -60,9 +92,13 @@ the security and correctness choices behind the auth and ownership checks.
   probes every dependency and names the one that is unavailable. The binary's
   version and revision are also exposed as `todo_build_info`.
 - An optional Prometheus + Grafana stack in a compose file of its own, with
-  a provisioned dashboard. Everything the stack publishes is
+  four provisioned dashboards. Everything the stack publishes is
   bound to `127.0.0.1`, Grafana has no default password, and `/metrics` is
   served on a listener the compose file never publishes.
+- Repeatable load scenarios (`scripts/load-test.py`,
+  `scripts/load-test-bursts.py`) that drive the real API in an isolated
+  Compose project, so the dashboards can be read under traffic without
+  touching the development stack.
 - A central HTTP error handler: every domain error maps to a specific status
   code (404/409/400/401/403) and to a stable machine-readable `code`, and only
   that error's message ever reaches the client - anything unexpected is logged
@@ -85,12 +121,90 @@ the security and correctness choices behind the auth and ownership checks.
 
 ## Architecture
 
+### Layers and dependency direction
+
+Arrows point the way the code depends: every layer knows only about the one
+below it, and the innermost two know nothing about HTTP, SQL or Prometheus.
+The dashed arrows are the inversion that makes this work — `usecase` and
+`handler` declare the interfaces they need (`ports.go`), and `main.go` is the
+only place where the concrete pgx repositories and use cases are plugged in.
+
+```mermaid
+flowchart TB
+    client([HTTP client]) --> server
+
+    subgraph transport["transport — HTTP"]
+        direction TB
+        server["httpserver<br/>routes · middleware chain · graceful drain"] --> mw["middleware<br/>request id · JWT auth · logging · metrics"]
+        mw --> handler["handler + dto<br/>thin controllers, JSON shapes"]
+    end
+
+    handler -.->|"interface call<br/>handler.TaskService"| usecase
+
+    subgraph business["business rules"]
+        usecase["usecase<br/>validation · ownership · timeouts<br/>declares the repository interfaces"]
+    end
+
+    usecase -.->|"interface call<br/>usecase.TaskRepository"| repo
+
+    subgraph storage["storage"]
+        repo["repository/postgres<br/>SQL · transactions · row locks"]
+    end
+
+    repo --> db[("PostgreSQL 17")]
+    transport --> core["domain + apperr<br/>entities and sentinel errors<br/>(no framework imports)"]
+    business --> core
+    storage --> core
+    main["cmd/server — composition root<br/>builds the concrete types and injects them"] --> transport
+```
+
+`domain` depends on nothing in this project; `usecase` depends only on
+`domain`; `repository/postgres` and `transport/http` both depend on `domain`
+and are wired together in `cmd/server/main.go`. This is what makes it possible
+to unit test the use cases and handlers with in-memory fakes instead of a real
+database (see the `*_test.go` files throughout).
+
+### Request lifecycle
+
+What one authenticated write actually goes through, in order. The middleware
+order is deliberate — see [Log correlation](#log-correlation) for why `recover`
+sits where it does, and why the access log and the metrics both derive the
+status code from the error rather than from the response.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant F as Fiber middleware
+    participant H as TaskHandler
+    participant U as TaskUseCase
+    participant R as TaskRepository
+    participant P as PostgreSQL
+
+    C->>F: POST /api/v1/tasks<br/>Authorization: Bearer …
+    Note over F: requestid → RequestContext → metrics →<br/>access log → recover → CORS → JSON header → JWT auth
+    F->>H: claims in locals, request context carries request_id
+    H->>H: BodyParser + validate (title required)
+    H->>U: Create(ctx, claims, title, description)
+    Note over U: owner comes from the token, never the body<br/>trim, length checks, ctx deadline = db.call_timeout
+    U->>R: Create(ctx, domain.Task)
+    R->>P: INSERT … RETURNING (parameters $1..$4)
+    P-->>R: row
+    R-->>U: domain.Task
+    U-->>H: domain.Task
+    H-->>C: 201 + TaskResponse
+    Note over F,C: any error short-circuits to the central handler:<br/>status + {code, message, request_id}
+```
+
+### Package layout
+
 ```
 cmd/
   server/     entry point: config -> logger -> DB -> use cases -> HTTP server -> graceful shutdown
   hashpw/     CLI to bcrypt-hash a password for ADMIN_PASSWORD_HASH
   dsn/        prints the database URL the service would use, so tooling
               (the migration targets) connects exactly the way it does
+  envexec/    runs any command with .env loaded the way the service loads it
 
 internal/
   domain/         entities and value types (no framework imports)
@@ -123,37 +237,158 @@ migrations/       golang-migrate SQL migrations
                   checkout
 .dockerignore     keeps .env, .git and local drafts out of the build context
 deployments/      Dockerfile, Prometheus scrape config, provisioned Grafana
-                  datasource and dashboard
+                  datasource and dashboards
 scripts/          smoke-test.sh: end-to-end check against the running stack
+                  load-test*.py: isolated load scenarios, see Load tests
+                  migrate-verify.sh: up -> down -> up on a throwaway database
 docs/openapi.yaml OpenAPI 3 spec
 api/*.http        example requests (IntelliJ HTTP Client / VS Code REST Client)
 ```
 
-Dependency direction is inward: `domain` depends on nothing in this project;
-`usecase` depends only on `domain`; `repository/postgres` and
-`transport/http` both depend on `domain` and are wired together in
-`cmd/server/main.go`. This is what makes it possible to unit test the use
-cases and handlers with in-memory fakes instead of a real database (see the
-`*_test.go` files throughout).
-
 ## Quick start (Docker)
 
-Requires Docker Compose and Go 1.25+ (the development command wrapper loads
-`.env` with the same semantics as the server).
+**Prerequisites:** Docker Compose v2 (its `up` must support `--wait`), and
+Go 1.26+ — the Make targets run `go run ./cmd/envexec`, which loads `.env`
+with the same semantics as the server.
 
 ```bash
+# 1. secrets: the template is committed, the real file is git-ignored
 cp .env.example .env
-# edit .env: set DB_PASSWORD and JWT_SECRET at minimum
-#   openssl rand -base64 48   # good way to generate JWT_SECRET
-# everything else (ports, timeouts, log level, ...) already has a sensible
-# default in config.yaml - see Configuration below.
 
+# 2. fill in the two required values
+#    DB_PASSWORD=<anything, it creates the local database>
+#    JWT_SECRET=$(openssl rand -base64 48)
+#    everything else already has a default in config.yaml
+
+# 3. build the image, start Postgres + the API, wait until both are healthy
 make docker-up
-curl http://localhost:8080/healthz
+
+# 4. verify: 200 means the API is up *and* can reach Postgres
+curl localhost:8080/readyz
+# {"status":"ready","checks":{"postgres":{"status":"ok","duration_ms":0.4}}}
 ```
 
-This builds the API image and starts it alongside Postgres; migrations run
-automatically on startup. Tear it down with `make docker-down`.
+That is the whole setup. There is no "now run the migrations" step: the
+service applies them itself on startup (`run_migrations: true`), so a fresh
+volume and an upgraded binary reach the same schema the same way.
+
+```mermaid
+flowchart LR
+    env[".env<br/>from .env.example"] --> build
+    build["docker compose build app<br/>BuildKit cache mounts"] --> db
+    db[("db: postgres:17<br/>pg_isready")] -->|healthy| app
+    app["app: migrate on boot<br/>then serve :8080"] -->|"/readyz = 200"| ready(["make docker-up returns"])
+```
+
+`make docker-up` builds the API image from the current source, starts it
+alongside Postgres and returns only once both containers report healthy;
+migrations run automatically on startup. The API counts as healthy when
+`GET /readyz` answers `200`, i.e. when it can reach Postgres, not merely when
+the process is up.
+
+### Everyday commands
+
+| Situation | Command | Builds? |
+|---|---|---|
+| First run, or after changing Go code, `go.mod`, `migrations/` or `config.yaml` | `make docker-up` | yes, incrementally |
+| Start again after `docker-stop`, a reboot or `docker-down`, code unchanged | `make docker-start` | no |
+| Pause the stack, keeping the containers | `make docker-stop` | - |
+| Remove the containers (the database volume is kept) | `make docker-down` | - |
+| Follow the API's logs | `make docker-logs` | - |
+| Find out why the stack is not ready | `make docker-diagnose` | - |
+| Drive the real API end to end | `make smoke-test` | yes, if needed |
+
+Neither `docker-down` nor any other target here removes the `todo_pgdata`
+volume, so the database survives all of them.
+
+`make docker-start` never builds: if the image `to-do-list-app:local` does not
+exist yet, it stops and tells you to run `make docker-up`. It also does not
+notice that the code has changed since the last build - that is what
+`docker-up` is for.
+
+`make docker-up` is cheap to repeat. With nothing changed every layer is
+cached and the running container is left alone (about 3 s). After an edit the
+Dockerfile's BuildKit cache mounts (`/go/pkg/mod`, `/root/.cache/go-build`)
+keep downloaded modules and compiled packages across builds, so only the
+packages the edit touched are recompiled and the container is recreated.
+
+Both start targets wait at most `COMPOSE_WAIT_TIMEOUT` seconds (default 120)
+for the containers to become healthy. The health checks run every 5 s (db)
+and every 10 s (app), so a cold start takes at least ~15 s even when nothing
+is wrong. Shortening `interval` would make the probes run that often for the
+container's whole life; the Engine 25+ `start_interval`, which only speeds up
+the start, is not used so that older Docker versions behave the same.
+
+### Ports, and how to move them
+
+Everything binds to `127.0.0.1` and nothing is reachable from the network
+unless you ask for it. Each published port is an environment variable, so a
+port that is already taken on your machine is one line in `.env`, not a patch
+to the compose file:
+
+| Service | Default URL | Variable | Note |
+|---|---|---|---|
+| API | `http://localhost:8080` | `SERVER_PORT` | container always listens on `8080`; this is only the host side |
+| Postgres | `localhost:5432` | `DB_PORT` | used by `psql`, the migration targets and the integration tests; inside the network the app always dials `db:5432` |
+| Grafana | `http://localhost:3000` | `GRAFANA_PORT` | monitoring stack only |
+| Prometheus | `http://localhost:9090` | `PROMETHEUS_PORT` | monitoring stack only |
+| `/metrics` | not published | `METRICS_ADDRESS` | served on `:9101` inside the network; Prometheus scrapes it there |
+| All of the above | `127.0.0.1` | `BIND_HOST` | `0.0.0.0` exposes the stack to the local network — a demo on a trusted network and nothing more |
+
+```bash
+# example: the host already runs Postgres and Grafana
+printf 'DB_PORT=5433\nGRAFANA_PORT=3001\n' >> .env
+make docker-up
+```
+
+A port collision shows up as
+`Ports are not available: … bind: address already in use` and names the port
+in question. `SERVER_ADDRESS` is the one exception: it changes the port
+*inside* the container, which compose still publishes as `8080`, so leave it
+alone unless you are also editing the compose file.
+
+### When the stack does not become ready
+
+`docker-up` and `docker-start` exit non-zero if a container is still not
+healthy after the timeout, and print the same report `make docker-diagnose`
+gives: container state, the recent health-check results, and the last 50 log
+lines of `db` and `app`. They never print the resolved Compose configuration,
+which contains the secrets. Typical causes:
+
+- `app` health check failing with `503`: the API is up but cannot reach
+  Postgres - look for `readiness check failed` in the app log. A common
+  cause is a `todo_pgdata` volume initialised with a different `DB_PASSWORD`
+  than the one now in `.env`: Postgres keeps the password it was created with.
+- `app` restarting: it refused to start; the first log lines name the bad
+  setting (a missing `JWT_SECRET`, a malformed `ADMIN_PASSWORD_HASH`, a
+  failed migration).
+- `db` not starting: usually a host port already in use - see
+  [Ports](#ports-and-how-to-move-them).
+- Only slow, not broken (first image pull, a cold machine): retry with
+  `make docker-start COMPOSE_WAIT_TIMEOUT=300`.
+
+Run Compose by hand through the same `.env` loader, e.g.
+`go run ./cmd/envexec docker compose --env-file /dev/null ps`, never with
+`docker compose config`, which prints the secrets.
+
+### Version metadata in the image
+
+`make docker-up`, `make observability-build` and `make smoke-test` stamp the
+image with:
+
+- `VERSION` - `git describe --tags --always --dirty`
+- `COMMIT` - the short hash of `HEAD`
+- `BUILD_DATE` - the **commit time** of `HEAD` (UTC), not the wall clock
+
+These are build arguments, and a changed build argument invalidates the
+`go build` layer. With the wall clock every run would relink the binary and
+recreate the container for nothing, so the date only moves when `HEAD` does;
+an uncommitted change shows up as `-dirty` in the version. To stamp the real
+build time anyway, at the cost of a relink: `make docker-up
+IMAGE_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)`. A plain `docker compose
+build` passes none of these and stamps `dev`/`unknown`. `make build` (the
+local binary) still uses the current time. `GET /healthz` reports what the
+running image carries.
 
 To verify the whole stack actually works end to end - not just that the
 containers start, but that registration, login and task CRUD really hit
@@ -175,7 +410,9 @@ afterwards.
 
 ## Local development (without Docker)
 
-Requires Go 1.25+ and a Postgres instance.
+Requires Go 1.26+ and a Postgres instance. (`go.mod` asks only for 1.25,
+but Go backports security fixes to the two newest lines, 1.26 and 1.27, and
+this is the project those fixes are built with.)
 
 ```bash
 cp .env.example .env
@@ -183,8 +420,18 @@ cp .env.example .env
 # localhost:5432, either edit db.host/db.port in config.yaml or override
 # DB_HOST/DB_PORT in .env
 
-go mod tidy   # fetches dependencies - needs network access
-make run      # or: go run ./cmd/server
+go mod download   # fetches the pinned dependencies; needs network access
+make run          # or: go run ./cmd/server
+```
+
+`go mod download` is deliberate here: it fetches exactly what `go.mod` and
+`go.sum` pin without rewriting either file, which is also what CI enforces.
+
+Only the database is needed from Docker for this, so start that alone and
+leave port 8080 to the local process:
+
+```bash
+go run ./cmd/envexec docker compose --env-file /dev/null up -d db
 ```
 
 `RUN_MIGRATIONS=true` (the default) applies pending migrations
@@ -192,11 +439,11 @@ automatically on startup. To manage them by hand instead:
 
 ```bash
 make migrate-up
-make migrate-down
+make migrate-down                      # rolls back exactly one migration
 make migrate-create name=add_something
 ```
 
-### Trying the API
+## Using the API
 
 Use the `.http` files in `api/` with the IntelliJ HTTP Client or the VS Code
 REST Client extension, or plain `curl`:
@@ -209,12 +456,15 @@ curl -X POST localhost:8080/api/v1/auth/register \
 curl -X POST localhost:8080/api/v1/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"username":"alice","password":"s3cret-password"}'
-# -> {"token": "...", "token_type": "Bearer", "expires_at": "..."}
+# -> {"token": "...", "token_type": "Bearer", "expires_at": "...",
+#     "refresh_token": "...", "refresh_expires_at": "..."}
 
 curl localhost:8080/api/v1/tasks \
   -H 'Authorization: Bearer <token from above>'
 ```
 
+`Content-Type: application/json` is required on every request with a body;
+without it the body is not parsed and the request is rejected with `400`.
 Full request/response shapes are in [`docs/openapi.yaml`](docs/openapi.yaml).
 
 ### Editing a task
@@ -283,11 +533,11 @@ answers with the same envelope:
 
 `code` is the contract and is safe to branch on: `validation_error`,
 `bad_request`, `not_found`, `conflict`, `unauthorized`, `invalid_credentials`,
-`forbidden`, `method_not_allowed`, `rate_limited`, `unavailable`,
-`internal_error`. `message` is written for people and may be reworded at any
-time. `fields` appears only when individual fields were rejected.
-`request_id` matches the `X-Request-ID` header and the server's log line for
-the same request.
+`forbidden`, `method_not_allowed`, `payload_too_large`, `rate_limited`,
+`unavailable`, `internal_error`. `message` is written for people and may be
+reworded at any time. `fields` appears only when individual fields were
+rejected. `request_id` matches the `X-Request-ID` header and the server's log
+line for the same request.
 
 Two of those are worth telling apart. `internal_error` (`500`) means
 something went wrong that should not have, and the request is not worth
@@ -299,97 +549,40 @@ tell a client to give up on a request that will very likely succeed, and
 would bury a slow dependency at the same log level as a crash; timeouts are
 logged as warnings, with the detail the client is not given.
 
-## Configuration
+## Authentication and sessions
 
-Every setting lives in **`config.yaml`** at the project root. There are no
-defaults compiled into the Go code: if a key is missing there and no
-environment variable supplies it, the service refuses to start and names the
-key. That keeps one file as the answer to "what does this service actually
-run with".
+### Token flow
 
-Values are resolved from three sources, lowest priority first:
+A login hands out two things with very different jobs: a short-lived access
+token that every request carries and nothing has to look up, and a long-lived
+refresh token that exists only to mint the next pair — and that the database
+can revoke.
 
-1. **`config.yaml`** - every non-secret setting. Committed to git.
-2. **`.env`** - secrets and per-machine overrides. Git-ignored (copy
-   `.env.example`).
-3. **Real environment variables** - always win. This is how
-   `docker-compose.yml` points the container at `DB_HOST=db`.
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant A as AuthUseCase
+    participant S as refresh_tokens (Postgres)
 
-An empty environment variable counts as "not set", so
-`docker-compose.yml` can pass optional overrides through as
-`LOG_LEVEL: ${LOG_LEVEL:-}` without blanking what `config.yaml` says.
+    C->>A: POST /auth/login {username, password}
+    Note over A: bcrypt verify (bounded concurrency)
+    A->>S: INSERT hash(refresh), family_id = new<br/>only while credentials_version is unchanged
+    A-->>C: access JWT (1h) + refresh token (30d)
 
-### Secrets
+    C->>A: GET /api/v1/tasks + Bearer access
+    Note over A: signature, exp, issuer and identity checked<br/>in process — no database round trip
 
-These four are **never** read from `config.yaml`, only from `.env` or the
-environment, so the committed file cannot leak one:
+    C->>A: POST /auth/refresh {refresh}
+    Note over A,S: one transaction, SELECT … FOR UPDATE on the user row
+    A->>S: consume presented token (revoked_reason = rotated)
+    A->>S: INSERT successor into the same family
+    A-->>C: new access + new refresh
 
-| Variable | Notes |
-|---|---|
-| `DB_PASSWORD` | Required |
-| `JWT_SECRET` | Required, at least `jwt.min_secret_length` characters |
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` | Optional superadmin login, see below |
-
-### Settings in `config.yaml`
-
-Each one can be overridden by the environment variable in the right-hand
-column.
-
-| `config.yaml` key | Value | Environment override |
-|---|---|---|
-| `app.name` | `to-do-list` | `APP_NAME` |
-| `app.env` | `development` | `APP_ENV` |
-| `server.address` | `:8080` | `SERVER_ADDRESS` |
-| `server.read_timeout` / `server.write_timeout` | `10s` | `SERVER_READ_TIMEOUT` / `SERVER_WRITE_TIMEOUT` |
-| `server.shutdown_timeout` | `15s` | `SERVER_SHUTDOWN_TIMEOUT` |
-| `server.max_body_bytes` | `1048576` | `SERVER_MAX_BODY_BYTES` |
-| `server.trusted_proxies` / `server.proxy_header` | empty / empty | `SERVER_TRUSTED_PROXIES` / `SERVER_PROXY_HEADER` |
-| `db.host` / `db.port` / `db.name` / `db.user` | `localhost` / `5432` / `to_do` / `postgres` | `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` |
-| `db.sslmode` | `disable` | `DB_SSLMODE` |
-| `db.connect_timeout` | `5s` | `DB_CONNECT_TIMEOUT` |
-| `db.call_timeout` | `5s` | `DB_CALL_TIMEOUT` |
-| `db.max_connections` / `db.min_connections` | `10` / `2` | `DB_MAX_CONNECTIONS` / `DB_MIN_CONNECTIONS` |
-| `db.max_conn_lifetime` / `db.max_conn_idle_time` | `1h` / `30m` | `DB_MAX_CONN_LIFETIME` / `DB_MAX_CONN_IDLE_TIME` |
-| `jwt.ttl` | `1h` | `JWT_TTL` |
-| `jwt.refresh_ttl` | `720h` | `JWT_REFRESH_TTL` |
-| `jwt.issuer` | `to-do-list` | `JWT_ISSUER` |
-| `jwt.min_secret_length` | `32` | `JWT_MIN_SECRET_LENGTH` |
-| `password.bcrypt_cost` | `12` | `PASSWORD_BCRYPT_COST` |
-| `password.min_length` | `8` | `PASSWORD_MIN_LENGTH` |
-| `password.max_concurrent_hashes` | `4` | `PASSWORD_MAX_CONCURRENT_HASHES` |
-| `user.min_username_length` / `user.max_username_length` | `3` / `50` | `USER_MIN_USERNAME_LENGTH` / `USER_MAX_USERNAME_LENGTH` |
-| `task.max_title_length` | `200` | `TASK_MAX_TITLE_LENGTH` |
-| `task.max_description_length` | `4000` | `TASK_MAX_DESCRIPTION_LENGTH` |
-| `pagination.default_page_size` | `20` | `PAGINATION_DEFAULT_PAGE_SIZE` |
-| `pagination.max_page_size` | `100` | `PAGINATION_MAX_PAGE_SIZE` |
-| `cleanup.interval` | `1h` | `CLEANUP_INTERVAL` |
-| `cleanup.refresh_token_retention` | `720h` | `CLEANUP_REFRESH_TOKEN_RETENTION` |
-| `ratelimit.auth_max_requests` / `ratelimit.auth_window` | `20` / `1m` | `RATELIMIT_AUTH_MAX_REQUESTS` / `RATELIMIT_AUTH_WINDOW` |
-| `cors.allow_origins` / `allow_methods` / `allow_headers` | `*` / methods / headers | `CORS_ALLOW_ORIGINS` / `CORS_ALLOW_METHODS` / `CORS_ALLOW_HEADERS` |
-| `health.ready_timeout` | `2s` | `HEALTH_READY_TIMEOUT` |
-| `observability.metrics_enabled` | `true` | `METRICS_ENABLED` |
-| `observability.metrics_path` | `/metrics` | `METRICS_PATH` |
-| `observability.metrics_namespace` | `todo` | `METRICS_NAMESPACE` |
-| `observability.metrics_address` | empty | `METRICS_ADDRESS` |
-| `log.level` / `log.format` | `info` / `json` | `LOG_LEVEL` / `LOG_FORMAT` |
-| `run_migrations` | `true` | `RUN_MIGRATIONS` |
-| `migrations_path` | `migrations` | `MIGRATIONS_PATH` |
-
-`config.yaml` is copied into the Docker image (see `deployments/Dockerfile`),
-because without it the service has no settings at all.
-
-### What stays in the code
-
-A few values are properties of an algorithm or protocol rather than choices a
-deployment gets to make, so they are constants, not settings: bcrypt's
-72-byte password limit (`password.MaxLength`), Postgres' `23505`
-unique-violation code, and the `Bearer ` authorization prefix. Making those
-configurable would only let a deployment configure itself into a bug.
-
-Policy that *is* configurable but cannot live in a struct tag - username and
-password lengths, task title/description limits - is enforced in the
-use-case layer instead, because `validate:"max=200"` tags are compile-time
-constants and cannot read `config.yaml`.
+    C->>A: POST /auth/logout {refresh}
+    A->>S: revoked_reason = logout
+    A-->>C: 204 — the access token still works until it expires
+```
 
 ### Session lifetime
 
@@ -427,14 +620,20 @@ The fix is a counter, `users.credentials_version`, bumped whenever the
 password is written. A login carries the version it verified against, and the
 session is only stored while that version is still current:
 
-```
-login                              password change
------                              ---------------
-read hash + version v                        |
-verify password                              |
-                                   write new hash, version -> v+1
-                                   revoke every existing session
-store session (expects v) ---------> refused: version is v+1
+```mermaid
+sequenceDiagram
+    participant L as Login (old password)
+    participant P as PostgreSQL
+    participant W as PATCH /users/{id} (new password)
+
+    L->>P: read hash + credentials_version = v
+    Note over L: bcrypt verify succeeds
+    W->>P: BEGIN · SELECT user FOR UPDATE
+    W->>P: write new hash, credentials_version = v+1
+    W->>P: revoke every session (reason = password_change) · COMMIT
+    L->>P: BEGIN · SELECT credentials_version FOR SHARE → v+1
+    Note over L,P: v+1 ≠ v → conflict → ROLLBACK
+    L-->>L: 401 invalid_credentials
 ```
 
 The check runs inside the insert's transaction, under a shared lock on the
@@ -450,6 +649,19 @@ rotation (`refresh_tokens.family_id`). Each revoked token also records why
 (`revoked_reason`: `rotated`, `logout`, `password_change`, `reuse`).
 
 A refresh token that cannot be exchanged is classified as follows:
+
+```mermaid
+flowchart TD
+    start["POST /auth/refresh<br/>with token T"] --> known{"T exists?"}
+    known -->|no| u401["401 — nothing changes"]
+    known -->|yes| live{"T still live<br/>and not expired?"}
+    live -->|yes| rotate["consume T, issue successor<br/>in the same family → 200"]
+    live -->|no| why{"why was T revoked?"}
+    why -->|"rotated"| family{"does its family still<br/>hold a live token?"}
+    why -->|"logout / password_change / reuse<br/>or expired"| u401
+    family -->|yes| reuse["REUSE: revoke every session<br/>of that user, reason = reuse → 401"]
+    family -->|no| u401
+```
 
 | Presented token | Its family | Result |
 |---|---|---|
@@ -511,8 +723,183 @@ it is not a bcrypt hash, rather than rejecting every admin login later.
 Logging in with that username checks the password against
 `ADMIN_PASSWORD_HASH` instead of the `users` table and issues a token with
 `is_admin: true`. An admin token can list/read/update/delete *any* user
-(`GET /api/v1/users`, etc.) but has no rows of its own in the `tasks` table.
-Leave both variables empty (the default) to disable this entirely.
+(`GET /api/v1/users`, etc.) but has no rows of its own in the `tasks` table -
+so it cannot create tasks, and that login is handed no refresh token: when the
+hour is up, log in again. Leave both variables empty (the default) to disable
+this entirely.
+
+## Data model
+
+Three tables, created and evolved by the migrations in `migrations/`. Both
+child tables cascade from `users`, so deleting an account takes its tasks and
+sessions with it in one statement.
+
+```mermaid
+erDiagram
+    users ||--o{ tasks : "creator_id"
+    users ||--o{ refresh_tokens : "user_id"
+
+    users {
+        bigserial id PK
+        text username "UNIQUE, + unique index on lower(username)"
+        text email "UNIQUE, + unique index on lower(email)"
+        text password_hash "bcrypt"
+        bigint credentials_version "bumped on every password write"
+        timestamptz created_at
+        timestamptz updated_at "trigger set_updated_at"
+    }
+
+    tasks {
+        bigserial id PK
+        text title
+        text description "DEFAULT ''"
+        text status "CHECK: created | in_progress | completed"
+        bigint creator_id FK "ON DELETE CASCADE"
+        timestamptz created_at
+        timestamptz updated_at "trigger set_updated_at"
+    }
+
+    refresh_tokens {
+        bigserial id PK
+        bigint user_id FK "ON DELETE CASCADE"
+        text token_hash "UNIQUE, SHA-256 hex — the token itself is never stored"
+        timestamptz expires_at
+        timestamptz revoked_at "NULL while live"
+        text revoked_reason "CHECK: rotated | logout | password_change | reuse"
+        uuid family_id "one login's rotation chain"
+        timestamptz created_at
+    }
+```
+
+Indexes follow the queries: `(creator_id, created_at DESC)` and
+`(creator_id, status)` for the task list, `lower(username)` / `lower(email)`
+for the case-insensitive uniqueness and the login lookup, and `family_id` for
+the reuse check. The `revoked_reason` column may only be set on a token that
+is actually revoked — a `CHECK` constraint enforces it, so an inconsistent
+state cannot be written even by hand.
+
+## Configuration
+
+Every setting lives in **`config.yaml`** at the project root. There are no
+defaults compiled into the Go code: if a key is missing there and no
+environment variable supplies it, the service refuses to start and names the
+key. That keeps one file as the answer to "what does this service actually
+run with".
+
+Values are resolved from three sources, lowest priority first:
+
+1. **`config.yaml`** - every non-secret setting. Committed to git.
+2. **`.env`** - secrets and per-machine overrides. Git-ignored (copy
+   `.env.example`).
+3. **Real environment variables** - always win. This is how
+   `docker-compose.yml` points the container at `DB_HOST=db`.
+
+An empty environment variable counts as "not set", so
+`docker-compose.yml` can pass optional overrides through as
+`LOG_LEVEL: ${LOG_LEVEL:-}` without blanking what `config.yaml` says.
+
+### Secrets
+
+These four are **never** read from `config.yaml`, only from `.env` or the
+environment, so the committed file cannot leak one:
+
+| Variable | Notes |
+|---|---|
+| `DB_PASSWORD` | Required |
+| `JWT_SECRET` | Required, at least `jwt.min_secret_length` characters |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` | Optional superadmin login, see above |
+
+How the secrets are handled, end to end:
+
+- `.env` is git-ignored and `.dockerignore`d, so it reaches neither a commit
+  nor a build context; `.env.example` holds placeholders only.
+- Nothing sources `.env` through a shell. `cmd/envexec` parses it literally
+  and hands the values to the child process, so a `$`, a backtick or a quote
+  inside a bcrypt hash cannot be expanded or re-interpreted on the way.
+- Compose is always given `--env-file /dev/null`, and `docker compose config`
+  — which prints every resolved secret — is never part of a documented
+  workflow. `make docker-diagnose` deliberately prints container state and
+  logs instead.
+- The migration targets hide their command line (`@` recipes), because the
+  DSN contains the database password.
+- `make gen-admin-hash` reads the password from a prompt with echo off and
+  pipes it to `cmd/hashpw`, which refuses a command-line argument.
+- Only a bcrypt hash of a user password and a SHA-256 hash of a refresh token
+  are ever stored; neither the service's logs nor its error responses contain
+  credentials, tokens or connection strings.
+- Keep the file to yourself as well: `chmod 600 .env`.
+
+`.env.example` ships with placeholders, not values: replace
+`JWT_SECRET=change-me-to-a-random-secret-at-least-32-characters-long` with a
+real secret (`openssl rand -base64 48`) — it is long enough to pass the length
+check, which makes it exactly the kind of placeholder that survives into a
+deployment unnoticed.
+
+### Settings in `config.yaml`
+
+Each one can be overridden by the environment variable in the right-hand
+column.
+
+| `config.yaml` key | Value | Environment override |
+|---|---|---|
+| `app.name` | `to-do-list` | `APP_NAME` |
+| `app.env` | `development` | `APP_ENV` |
+| `server.address` | `:8080` | `SERVER_ADDRESS` |
+| `server.read_timeout` / `server.write_timeout` | `10s` | `SERVER_READ_TIMEOUT` / `SERVER_WRITE_TIMEOUT` |
+| `server.shutdown_timeout` | `15s` | `SERVER_SHUTDOWN_TIMEOUT` |
+| `server.max_body_bytes` | `1048576` | `SERVER_MAX_BODY_BYTES` |
+| `server.trusted_proxies` / `server.proxy_header` | empty / empty | `SERVER_TRUSTED_PROXIES` / `SERVER_PROXY_HEADER` |
+| `db.host` / `db.port` / `db.name` / `db.user` | `localhost` / `5432` / `to_do` / `postgres` | `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` |
+| `db.sslmode` | `disable` | `DB_SSLMODE` |
+| `db.connect_timeout` | `5s` | `DB_CONNECT_TIMEOUT` |
+| `db.call_timeout` | `5s` | `DB_CALL_TIMEOUT` |
+| `db.max_connections` / `db.min_connections` | `10` / `2` | `DB_MAX_CONNECTIONS` / `DB_MIN_CONNECTIONS` |
+| `db.max_conn_lifetime` / `db.max_conn_idle_time` | `1h` / `30m` | `DB_MAX_CONN_LIFETIME` / `DB_MAX_CONN_IDLE_TIME` |
+| `jwt.ttl` | `1h` | `JWT_TTL` |
+| `jwt.refresh_ttl` | `720h` | `JWT_REFRESH_TTL` |
+| `jwt.issuer` | `to-do-list` | `JWT_ISSUER` |
+| `jwt.min_secret_length` | `32` | `JWT_MIN_SECRET_LENGTH` |
+| `password.bcrypt_cost` | `12` | `PASSWORD_BCRYPT_COST` |
+| `password.min_length` | `8` | `PASSWORD_MIN_LENGTH` |
+| `password.max_concurrent_hashes` | `4` | `PASSWORD_MAX_CONCURRENT_HASHES` |
+| `user.min_username_length` / `user.max_username_length` | `3` / `50` | `USER_MIN_USERNAME_LENGTH` / `USER_MAX_USERNAME_LENGTH` |
+| `task.max_title_length` | `200` | `TASK_MAX_TITLE_LENGTH` |
+| `task.max_description_length` | `4000` | `TASK_MAX_DESCRIPTION_LENGTH` |
+| `pagination.default_page_size` | `20` | `PAGINATION_DEFAULT_PAGE_SIZE` |
+| `pagination.max_page_size` | `100` | `PAGINATION_MAX_PAGE_SIZE` |
+| `cleanup.interval` | `1h` | `CLEANUP_INTERVAL` |
+| `cleanup.refresh_token_retention` | `720h` | `CLEANUP_REFRESH_TOKEN_RETENTION` |
+| `ratelimit.auth_max_requests` / `ratelimit.auth_window` | `20` / `1m` | `RATELIMIT_AUTH_MAX_REQUESTS` / `RATELIMIT_AUTH_WINDOW` |
+| `cors.allow_origins` / `allow_methods` / `allow_headers` | `*` / methods / headers | `CORS_ALLOW_ORIGINS` / `CORS_ALLOW_METHODS` / `CORS_ALLOW_HEADERS` |
+| `health.ready_timeout` | `2s` | `HEALTH_READY_TIMEOUT` |
+| `observability.metrics_enabled` | `true` | `METRICS_ENABLED` |
+| `observability.metrics_path` | `/metrics` | `METRICS_PATH` |
+| `observability.metrics_namespace` | `todo` | `METRICS_NAMESPACE` |
+| `observability.metrics_address` | empty | `METRICS_ADDRESS` |
+| `log.level` / `log.format` | `info` / `json` | `LOG_LEVEL` / `LOG_FORMAT` |
+| `run_migrations` | `true` | `RUN_MIGRATIONS` |
+| `migrations_path` | `migrations` | `MIGRATIONS_PATH` |
+
+Compose-only knobs — `BIND_HOST`, `SERVER_PORT`, `GRAFANA_PORT`,
+`PROMETHEUS_PORT`, `GRAFANA_USER`, `GRAFANA_PASSWORD`, `GRAFANA_ANONYMOUS` —
+are read by the compose files and the Make targets, not by the service; see
+[Ports](#ports-and-how-to-move-them).
+
+`config.yaml` is copied into the Docker image (see `deployments/Dockerfile`),
+because without it the service has no settings at all.
+
+### What stays in the code
+
+A few values are properties of an algorithm or protocol rather than choices a
+deployment gets to make, so they are constants, not settings: bcrypt's
+72-byte password limit (`password.MaxLength`), Postgres' `23505`
+unique-violation code, and the `Bearer ` authorization prefix. Making those
+configurable would only let a deployment configure itself into a bug.
+
+Policy that *is* configurable but cannot live in a struct tag - username and
+password lengths, task title/description limits - is enforced in the
+use-case layer instead, because `validate:"max=200"` tags are compile-time
+constants and cannot read `config.yaml`.
 
 ## Testing
 
@@ -523,6 +910,7 @@ make test-integration   # needs a real Postgres reachable at TEST_DATABASE_URL
 make test-contract      # real HTTP responses checked against docs/openapi.yaml
 make migrate-verify     # up -> down -> up, and an upgrade over existing rows
 make smoke-test         # the whole stack through the real HTTP API
+make ci                 # everything that needs neither Postgres nor docker
 ```
 
 `make lint` reports and never rewrites: it runs `gofmt -l`, `go vet` and
@@ -568,11 +956,15 @@ make docker-up   # brings up Postgres (and the app)
 go run ./cmd/envexec docker compose --env-file /dev/null exec -T db \
   psql -U postgres -c 'CREATE DATABASE to_do_test'
 
-TEST_DATABASE_URL="postgres://postgres:<password>@localhost:5432/to_do_test?sslmode=disable" \
-  make test-integration
+# the URL carries a password, so put it in .env rather than in the shell:
+# TEST_DATABASE_URL=postgres://postgres:<password>@localhost:5432/to_do_test?sslmode=disable
+make test-integration
 ```
 
-The suite refuses to start unless the database name ends in `_test`
+`make test-integration` runs through the same `.env` loader as everything
+else, so the line above belongs in `.env` (git-ignored) instead of on a
+command line, where it would land in the shell history. Use the port Postgres
+is actually published on if you moved it with `DB_PORT`. The suite refuses to start unless the database name ends in `_test`
 (`TEST_DATABASE_ALLOW_ANY_NAME=1` overrides that, deliberately awkwardly), so
 a typo in the URL costs a failed test run rather than the contents of the
 development database. In CI the database is a service container created as
@@ -655,7 +1047,9 @@ directly.
 Postgres blinked turns a short outage into a longer one. `/readyz` probes each
 dependency under `health.ready_timeout` and reports them separately, so an
 unready instance says *which* dependency is at fault rather than only that
-something is. It answers `503` if any check fails.
+something is. It answers `503` if any check fails. The compose health check
+uses `/readyz`, which is why `make docker-up` returning means the API can
+actually reach the database.
 
 What it does **not** publish is *why*. A connection error names the host, the
 port, the database and the user the service was trying to reach, and neither
@@ -721,11 +1115,25 @@ reads it.
 
 ```bash
 # GRAFANA_PASSWORD must be set in .env first - there is no default.
-make observability-up     # db + app + Prometheus + Grafana
+make observability-build  # build the API image (the same one docker-up builds)
+make observability-up     # db + app + Prometheus + Grafana, no build
 # Grafana:    http://127.0.0.1:3000   (log in as admin with GRAFANA_PASSWORD)
 # Prometheus: http://127.0.0.1:9090
 make observability-down
 ```
+
+Both URLs follow `GRAFANA_PORT` / `PROMETHEUS_PORT` if you moved them, and
+`observability-up` prints the ones it actually used.
+
+Four dashboards are provisioned from `deployments/grafana/`, so they are there
+on first load with the Prometheus datasource already wired up:
+
+| Dashboard | What it is for |
+|---|---|
+| **to-do-list service** | The full view: RPS and latency per route, status mix, auth and refresh outcomes, pool saturation, janitor activity |
+| **To-do \| 1. API overview** | RED metrics at a glance — traffic, errors, duration |
+| **To-do \| 2. Authentication and sessions** | Logins, registrations, rotations, sessions ended by reason |
+| **To-do \| 3. Go runtime and PostgreSQL pool** | Goroutines, memory, GC, connection-pool waits |
 
 Three things about this stack are deliberate, because the usual local-demo
 shortcuts are also the usual ways a laptop ends up serving its database to a
@@ -737,7 +1145,20 @@ café:
   a demo on a network you trust and nothing more.
 - **Grafana has no default password and no anonymous access.** The stack
   refuses to start without `GRAFANA_PASSWORD`, and opening the dashboards
-  without a login is opt-in with `GRAFANA_ANONYMOUS=true`.
+  without a login is opt-in with `GRAFANA_ANONYMOUS=true`. Grafana stores the
+  admin password when its volume is first created, so changing
+  `GRAFANA_PASSWORD` later does not change the login. To reset it without
+  putting the password in the shell history:
+
+  ```bash
+  read -rs -p 'new Grafana password: ' GF && echo
+  docker exec -i todo_grafana grafana cli --homepath /usr/share/grafana \
+    admin reset-admin-password "$GF"
+  ```
+
+  The argument is still visible in `ps` on this machine while the command
+  runs, which is acceptable for a local stack and is not how a deployed one
+  should be managed.
 - **`/metrics` is not on the API port.** `METRICS_ADDRESS` moves it to a
   listener of its own (`:9101` in compose), which the compose file does not
   publish; Prometheus reaches it over the internal network. The endpoint has
@@ -754,16 +1175,44 @@ limiter sees the real client address.
 since they are exactly what gets loosened during an evening of debugging and
 then committed.
 
-The datasource and the dashboard are provisioned from
-`deployments/grafana/provisioning/`, so the **to-do-list service** dashboard is
-there on first load, with RPS and latency per route, the status-code mix, auth
-and refresh outcomes, pool saturation and the janitor's activity.
-
 To look at the raw numbers instead:
 
 ```bash
 make metrics              # the todo_* series the running service exposes
 ```
+
+### Load tests
+
+Dashboards are only convincing with traffic behind them. Two runners drive the
+real API — real logins, real bcrypt, real rotation — in a **separate Compose
+project** (`todo-loadtest`, API `:8081`, Prometheus `:9091`, Grafana `:3001`),
+so the development stack, its database and its volumes are untouched:
+
+```bash
+make observability-build                  # the image both runners use
+
+python3 scripts/load-test.py              # 1,000 users, 20 workers, 120 s steady load
+python3 scripts/load-test-bursts.py       # 15 minutes of spikes and quiet periods
+python3 scripts/load-test.py --down       # stop the isolated stack, keep its data
+```
+
+Details, workload mix and how to read the reports: [`scripts/load-test.md`](scripts/load-test.md)
+and [`scripts/load-test-bursts.md`](scripts/load-test-bursts.md). Both print
+Grafana links with the exact run interval already selected, and write a
+redacted JSON report (per-phase and per-operation status counts, client
+p50/p95/p99) next to it.
+
+What these runs do and do not prove is stated in those documents rather than
+implied: the auth rate limiter is raised **inside the isolated stack only**, so
+1,000 logins can happen on one machine; the workload is closed-loop with think
+time, so it measures how the service behaves under a given population, not a
+guaranteed arrival rate or a production capacity limit; and the host is shared
+with everything else running on it.
+
+For a guided tour of the endpoints that also lights up every panel — including
+the negative paths, reuse detection and revocation reasons —
+[`scripts/grafana-demo.py`](scripts/grafana-demo.md) walks the whole contract
+against the ordinary stack and exits non-zero on any unexpected status.
 
 ## Continuous integration
 
@@ -771,6 +1220,22 @@ Every push and every pull request runs
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml). Six jobs run in
 parallel and a seventh waits on all of them, so one green tick means all of
 this held:
+
+```mermaid
+flowchart LR
+    push(["push / pull request<br/>any branch"]) --> lint["lint<br/>gofmt · vet · staticcheck<br/>-mod=readonly · tidy diff"]
+    push --> test["test<br/>go test -race + coverage"]
+    push --> integ["integration<br/>Postgres 17 · migrate-verify"]
+    push --> contract["contract<br/>redocly lint · OpenAPI test"]
+    push --> vuln["vulncheck<br/>govulncheck"]
+    push --> deliv["delivery<br/>docker build · smoke test"]
+    lint --> gate(["All checks passed"])
+    test --> gate
+    integ --> gate
+    contract --> gate
+    vuln --> gate
+    deliv --> gate
+```
 
 | Job | What it proves |
 |---|---|
@@ -798,9 +1263,8 @@ Some deliberate choices in there:
   summary; the profile is kept as an artifact. There is no coverage number
   hard-coded in this README, because a number in a README is a number nobody
   re-measures.
-
 - **The Go line is tracked, never pinned to a patch.** Both the workflow and
-  `deployments/Dockerfile` name a minor version (`1.25`) and pick up its
+  `deployments/Dockerfile` name a minor version (`1.27`) and pick up its
   newest patch on every run. Patch releases are where the standard library's
   security fixes arrive, so an exact pin goes stale the day after it is
   written - silently, because a pin never fails.
@@ -808,15 +1272,16 @@ Some deliberate choices in there:
   starts pinning a patch: `govulncheck` runs under the toolchain the workflow
   installs, never under the one the image is built with, so without that
   check the shipped binary could sit a whole minor version behind a green
-  pipeline.
+  pipeline. A minor line eventually leaves support — when it does, moving
+  both places is one edit that test will insist on.
 
 Locally, `make ci` runs everything that needs neither Postgres nor docker.
 
 `make vulncheck` deserves one warning, because its failure mode looks like a
 bug in this repository and is not. `govulncheck` reports advisories against
 the standard library of **whichever toolchain runs it**, so an out-of-date
-local Go prints a long list of `Found in: crypto/tls@go1.25 / Fixed in:
-crypto/tls@go1.25.13` - findings no change here can fix. The fix is to update
+local Go prints a long list of `Found in: net/http@go1.25.14 / Fixed in:
+net/http@go1.26.9` - findings no change here can fix. The fix is to update
 Go (`brew upgrade go`, or <https://go.dev/dl/>). Findings that name a module
 instead of the standard library are the ones this repository owns, and
 `go get <module>@<fixed version> && go mod tidy` is what answers those.
@@ -892,8 +1357,9 @@ the limitation is documented rather than engineered around.
   Passwords are only re-hashed when a caller actually supplies a new one.
 - A single central error handler (`internal/transport/http/errors.go`)
   maps `apperr` sentinels to HTTP status codes, so handlers just return an
-  error and never write ad-hoc response bodies. `recover.New()` sits first
-  in the middleware chain.
+  error and never write ad-hoc response bodies. `recover.New()` is mounted
+  inside the metrics and access-log middleware, so a panic is counted and
+  logged like any other `500` - see [Log correlation](#log-correlation).
 - Shutdown runs on two contexts, and the difference is the whole of it.
   `signal.NotifyContext` is cancelled the instant `SIGTERM` arrives and only
   decides *when* to stop; requests hang off a separate context that survives
@@ -908,7 +1374,8 @@ the limitation is documented rather than engineered around.
   than being closed under requests that are still running
   (`TestAwaitStop_DrainsEvenWhenTheExitIsAFailure`).
 - Migrations (`golang-migrate`) run automatically on startup, toggleable
-  with `RUN_MIGRATIONS`.
+  with `RUN_MIGRATIONS`. The driver takes a Postgres advisory lock, so two
+  instances starting at once do not race each other through the same files.
 - Observability points inward like everything else. `internal/usecase`
   declares the `MetricsRecorder` interface it needs and knows nothing about
   Prometheus; `internal/observability` implements it. The recorder is passed
@@ -977,4 +1444,4 @@ this same format; neither Make nor Bash sources `.env`. Compose is passed
 `--env-file /dev/null` so it consumes the resolved process environment instead
 of parsing `.env` again. Use the Make targets, or prefix a direct Compose call
 with `go run ./cmd/envexec docker compose --env-file /dev/null ...`.
-The smoke script therefore also requires Go 1.25+.
+The smoke script therefore also requires Go 1.26+.

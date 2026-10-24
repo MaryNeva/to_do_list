@@ -2,13 +2,16 @@
 
 # Track the Go minor line (not a patch) so rebuilds get stdlib security fixes.
 # Must match GO_VERSION in CI; deployments/toolchain_test.go checks this.
-FROM golang:1.25-alpine AS build
+FROM golang:1.27-alpine AS build
 WORKDIR /src
 
 # Separate layer so source edits do not re-download modules. No go mod tidy:
-# the image must build exactly what go.mod/go.sum pin.
+# the image must build exactly what go.mod/go.sum pin. The module cache is a
+# BuildKit cache mount, not a layer, so the build step below must mount the
+# same target to see it.
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 # Copy only build inputs so unrelated files do not invalidate the cache.
 COPY cmd ./cmd
@@ -19,8 +22,12 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
 
-# -mod=readonly fails instead of modifying go.mod/go.sum.
-RUN CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath \
+# -mod=readonly fails instead of modifying go.mod/go.sum. The build cache
+# survives an invalidated layer, so a source edit recompiles only the packages
+# it touched, and a metadata-only change only relinks.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath \
     -ldflags="-s -w \
       -X to-do-list/internal/buildinfo.version=${VERSION} \
       -X to-do-list/internal/buildinfo.commit=${COMMIT} \

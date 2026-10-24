@@ -4,6 +4,7 @@ package deployments
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -14,6 +15,7 @@ const (
 	composePath              = "../docker-compose.yml"
 	observabilityComposePath = "../docker-compose.observability.yml"
 	prometheusPath           = "prometheus/prometheus.yml"
+	makefilePath             = "../Makefile"
 	dashboardPath            = "grafana/dashboards/to-do-list.json"
 )
 
@@ -22,9 +24,16 @@ type compose struct {
 }
 
 type service struct {
+	Image       string            `yaml:"image"`
 	Ports       []string          `yaml:"ports"`
 	Environment map[string]string `yaml:"environment"`
 	Command     []string          `yaml:"command"`
+	DependsOn   map[string]struct {
+		Condition string `yaml:"condition"`
+	} `yaml:"depends_on"`
+	Healthcheck struct {
+		Test []string `yaml:"test"`
+	} `yaml:"healthcheck"`
 }
 
 // loadCompose merges the given files (both by default) like "docker compose -f ... -f ...".
@@ -191,5 +200,43 @@ func TestCompose_MonitoringSettingsMatchWhatPrometheusAndGrafanaExpect(t *testin
 	}
 	if !strings.Contains(string(dashboard), namespace+"_") {
 		t.Errorf("%s queries no series prefixed %q", dashboardPath, namespace+"_")
+	}
+}
+
+// make docker-up waits for "healthy", which must mean the API can reach
+// Postgres, not merely that the process answers.
+func TestCompose_AppIsHealthyOnlyWhenReady(t *testing.T) {
+	app, ok := loadCompose(t, composePath).Services["app"]
+	if !ok {
+		t.Fatal("the compose file has no app service")
+	}
+
+	if probe := strings.Join(app.Healthcheck.Test, " "); !strings.Contains(probe, "/readyz") {
+		t.Errorf("app health check is %q; it should probe /readyz, which checks Postgres", probe)
+	}
+	if got := app.DependsOn["db"].Condition; got != "service_healthy" {
+		t.Errorf("app depends on db with condition %q, want service_healthy", got)
+	}
+}
+
+var makefileAppImage = regexp.MustCompile(`(?m)^APP_IMAGE\s*:?=\s*(\S+)\s*$`)
+
+// make docker-start checks APP_IMAGE before starting without a build.
+func TestCompose_AppImageMatchesTheMakefile(t *testing.T) {
+	app, ok := loadCompose(t, composePath).Services["app"]
+	if !ok {
+		t.Fatal("the compose file has no app service")
+	}
+
+	raw, err := os.ReadFile(makefilePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", makefilePath, err)
+	}
+	match := makefileAppImage.FindSubmatch(raw)
+	if match == nil {
+		t.Fatalf("%s defines no APP_IMAGE", makefilePath)
+	}
+	if want := string(match[1]); app.Image != want {
+		t.Errorf("app.image is %q but the Makefile checks for %q; make docker-start would never find the image", app.Image, want)
 	}
 }

@@ -1,0 +1,446 @@
+{
+  "uid": "todo-api-demo",
+  "title": "To-do | 1. API overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "tags": [
+    "to-do-list",
+    "demo"
+  ],
+  "timezone": "browser",
+  "refresh": "15s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "API metrics scrape: 1 = up, 0 = down",
+      "type": "stat",
+      "description": "Prometheus can reach /metrics. This does not verify database readiness.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "todo-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=\"to-do-list\"}",
+          "legendFormat": "API scrape",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "todo-prometheus"
+          },
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 2,
+      "title": "API requests in selected period",
+      "type": "stat",
+      "description": "Only /api/v1/*; health probes excluded. increase() is extrapolated and may be fractional.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "todo-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(todo_http_requests_total{job=\"to-do-list\",route=~\"/api/v1/.*\"}[$__range]))",
+          "legendFormat": "API requests",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "todo-prometheus"
+          },
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 3,
+      "title": "API traffic by method and route",
+      "type": "timeseries",
+      "description": "Requests per second. 0.1 req/s is about 6 requests per minute.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "todo-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (method,route) (rate(todo_http_requests_total{job=\"to-do-list\",route=~\"/api/v1/.*\"}[$__rate_interval]))",
+          "legendFormat": "{{method}} {{route}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "todo-prometheus"
+          },
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "API responses by HTTP status",
+      "type": "stat",
+      "description": "200/201: success; 401: authentication; 403: permissions; 429: rate limit; 5xx: server failure.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "todo-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (status) (increase(todo_http_requests_total{job=\"to-do-list\",route=~\"/api/v1/.*\"}[$__range]))",
+          "legendFormat": "HTTP {{status}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "todo-prometheus"
+          },
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 5,
+      "title": "API p50 latency by method and route",
+      "type": "timeseries",
+      "description": "Estimated median from histogram buckets. Missing without traffic; sparse samples are unreliable.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "todo-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le,method,route) (rate(todo_http_request_duration_seconds_bucket{job=\"to-do-list\",route=~\"/api/v1/.*\"}[$__rate_interval])))",
+          "legendFormat": "{{method}} {{route}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "todo-prometheus"
+          },
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "API p95 latency by method and route",
+      "type": "timeseries",
+      "description": "Estimated latency below which 95% of requests finish. Not a maximum; sparse samples are unreliable.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "todo-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le,method,route) (rate(todo_http_request_duration_seconds_bucket{job=\"to-do-list\",route=~\"/api/v1/.*\"}[$__rate_interval])))",
+          "legendFormat": "{{method}} {{route}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "todo-prometheus"
+          },
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "API server error ratio",
+      "type": "timeseries",
+      "description": "5xx divided by API traffic. Undefined without traffic. Authentication failures are not 5xx.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "todo-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(todo_http_requests_total{job=\"to-do-list\",route=~\"/api/v1/.*\",status=~\"5..\"}[$__rate_interval])) / sum(rate(todo_http_requests_total{job=\"to-do-list\",route=~\"/api/v1/.*\"}[$__rate_interval]))",
+          "legendFormat": "{{method}} {{route}} {{status}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "todo-prometheus"
+          },
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "title": "API operations in selected period",
+      "type": "stat",
+      "description": "HTTP operations, not database row counts.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "todo-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (method,route) (increase(todo_http_requests_total{job=\"to-do-list\",route=~\"/api/v1/.*\"}[$__range]))",
+          "legendFormat": "{{method}} {{route}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "todo-prometheus"
+          },
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    }
+  ],
+  "links": [
+    {
+      "title": "API",
+      "type": "link",
+      "url": "/d/todo-api-demo",
+      "keepTime": true
+    },
+    {
+      "title": "Authentication",
+      "type": "link",
+      "url": "/d/todo-auth-demo",
+      "keepTime": true
+    },
+    {
+      "title": "Resources",
+      "type": "link",
+      "url": "/d/todo-runtime-demo",
+      "keepTime": true
+    }
+  ]
+}

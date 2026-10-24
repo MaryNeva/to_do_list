@@ -28,6 +28,7 @@ services:
       retries: 10
 
   app:
+    image: to-do-list-app:local
     build:
       context: .
       dockerfile: deployments/Dockerfile
@@ -75,8 +76,13 @@ services:
     ports:
       # The container port must match server.address in config.yaml.
       - "${BIND_HOST:-127.0.0.1}:${SERVER_PORT:-8080}:8080"
+    # /readyz, not /healthz: "healthy" must mean the API can reach Postgres,
+    # since make docker-up waits on it. Plain Docker never restarts an
+    # unhealthy container, so a Postgres blip only marks the app unhealthy.
+    # Engine 25+ could probe faster during start_period (start_interval);
+    # the intervals are kept as they are so older engines behave the same.
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/readyz >/dev/null || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 5
