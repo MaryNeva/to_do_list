@@ -1,7 +1,7 @@
 # to-do-list
 
 [![CI](https://github.com/MaryNeva/to_do_list/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/MaryNeva/to_do_list/actions/workflows/ci.yml)
-[![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/)
+[![Go](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/)
 [![Postgres](https://img.shields.io/badge/PostgreSQL-17-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Licence](https://img.shields.io/badge/licence-source--available-lightgrey)](LICENSE)
 
@@ -248,7 +248,7 @@ api/*.http        example requests (IntelliJ HTTP Client / VS Code REST Client)
 ## Quick start (Docker)
 
 **Prerequisites:** Docker Compose v2 (its `up` must support `--wait`), and
-Go 1.25+ — the Make targets run `go run ./cmd/envexec`, which loads `.env`
+Go 1.26+ — the Make targets run `go run ./cmd/envexec`, which loads `.env`
 with the same semantics as the server.
 
 ```bash
@@ -410,7 +410,9 @@ afterwards.
 
 ## Local development (without Docker)
 
-Requires Go 1.25+ and a Postgres instance.
+Requires Go 1.26+ and a Postgres instance. (`go.mod` asks only for 1.25,
+but Go backports security fixes to the two newest lines, 1.26 and 1.27, and
+this is the project those fixes are built with.)
 
 ```bash
 cp .env.example .env
@@ -1262,7 +1264,7 @@ Some deliberate choices in there:
   hard-coded in this README, because a number in a README is a number nobody
   re-measures.
 - **The Go line is tracked, never pinned to a patch.** Both the workflow and
-  `deployments/Dockerfile` name a minor version (`1.25`) and pick up its
+  `deployments/Dockerfile` name a minor version (`1.27`) and pick up its
   newest patch on every run. Patch releases are where the standard library's
   security fixes arrive, so an exact pin goes stale the day after it is
   written - silently, because a pin never fails.
@@ -1278,8 +1280,8 @@ Locally, `make ci` runs everything that needs neither Postgres nor docker.
 `make vulncheck` deserves one warning, because its failure mode looks like a
 bug in this repository and is not. `govulncheck` reports advisories against
 the standard library of **whichever toolchain runs it**, so an out-of-date
-local Go prints a long list of `Found in: crypto/tls@go1.25 / Fixed in:
-crypto/tls@go1.25.13` - findings no change here can fix. The fix is to update
+local Go prints a long list of `Found in: net/http@go1.25.14 / Fixed in:
+net/http@go1.26.9` - findings no change here can fix. The fix is to update
 Go (`brew upgrade go`, or <https://go.dev/dl/>). Findings that name a module
 instead of the standard library are the ones this repository owns, and
 `go get <module>@<fixed version> && go mod tidy` is what answers those.
@@ -1442,4 +1444,4 @@ this same format; neither Make nor Bash sources `.env`. Compose is passed
 `--env-file /dev/null` so it consumes the resolved process environment instead
 of parsing `.env` again. Use the Make targets, or prefix a direct Compose call
 with `go run ./cmd/envexec docker compose --env-file /dev/null ...`.
-The smoke script therefore also requires Go 1.25+.
+The smoke script therefore also requires Go 1.26+.

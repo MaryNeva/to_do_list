@@ -2,7 +2,7 @@
 
 # Track the Go minor line (not a patch) so rebuilds get stdlib security fixes.
 # Must match GO_VERSION in CI; deployments/toolchain_test.go checks this.
-FROM golang:1.25-alpine AS build
+FROM golang:1.27-alpine AS build
 WORKDIR /src
 
 # Separate layer so source edits do not re-download modules. No go mod tidy:
